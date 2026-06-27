@@ -139,7 +139,7 @@ adb shell su -c 'grep "built-in" /data/adb/lspd/log/verbose_*'      # APK 配置
 
 | 设备 | 架构 | 系统 | 微信版本 | 状态 |
 |------|------|------|---------|------|
-| Xiaomi 13 | ARM64 | Android 15 (HyperOS) | 8.0.45 | ✅ 全部功能正常 |
+| Xiaomi 13 | ARM64 | Android 15 (HyperOS) | 8.0.65 | ✅ 全部功能正常 |
 | 雷电模拟器 | x86_64 | Android 9 | 8.0.65 | ✅ 全部功能正常 |
 
 ---
@@ -295,7 +295,7 @@ Hidden prefixes: `com.fabmodule`, `de.robv.android.xposed`, `org.lsposed`
 
 | Device | Arch | Android | WeChat | Status |
 |--------|------|---------|--------|--------|
-| Xiaomi 13 | ARM64 | 15 (HyperOS) | 8.0.45 | ✅ All features |
+| Xiaomi 13 | ARM64 | 15 (HyperOS) | 8.0.65 | ✅ All features |
 | LDPlayer | x86_64 | 9 | 8.0.65 | ✅ All features |
 
 ## License
