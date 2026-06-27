@@ -134,7 +134,15 @@ MIT — 详见 [LICENSE](LICENSE)
 
 ## 致谢
 
-借鉴了 WAuxiliary、MDWechat_mod、XModule 和 Material Design 指南的实践经验。
+本项目在开发过程中深度参考了以下开源项目：
+
+| 项目 | 作者 | 借鉴内容 |
+|------|------|---------|
+| [**WAuxiliary**](https://github.com/HdShare/WAuxiliary_Public) | HdShare | Activity.onResume Hook 模式、反检测架构、decorView 注入思路 |
+| [**MDwechat_mod**](https://github.com/Cyanide-zh/MDwechat_mod) | Cyanide-zh (Fork from Blankeer/MDWechat) | FAB 悬浮按钮交互设计、Material Design 配色方案、菜单布局 |
+| [**WeXposed (微X模块)**](https://github.com/Xposed-Modules-Repo/com.fkzhang.wechatxposed) | fkzhang | 主题 JSON 配置格式、FAB 菜单项数据模型、图标文件组织方式 |
+
+同时遵循 [Material Design 3](https://m3.material.io/) 设计规范。
 
 ---
 
@@ -148,7 +156,7 @@ MIT — 详见 [LICENSE](LICENSE)
 > Standalone FAB (Floating Action Button) overlay for WeChat — LSPosed/Xposed module  
 > [切换到中文](#fabmodule)
 
-**688 lines Kotlin · 898KB APK · zero external dependencies · one `compileOnly` Xposed API**
+**688 lines Kotlin · 898KB APK · zero external dependencies · one `compileOnly` Xposed API`
 
 ## Features
 
@@ -262,4 +270,12 @@ MIT — see [LICENSE](LICENSE)
 
 ## Credits
 
-Built with insights from WAuxiliary, MDWechat_mod, XModule, and Material Design guidelines.
+This project was developed with deep reference to these open-source projects:
+
+| Project | Author | What We Learned |
+|---------|--------|-----------------|
+| [**WAuxiliary**](https://github.com/HdShare/WAuxiliary_Public) | HdShare | Activity.onResume hook pattern, anti-detection architecture, decorView injection approach |
+| [**MDwechat_mod**](https://github.com/Cyanide-zh/MDwechat_mod) | Cyanide-zh (Fork from Blankeer/MDWechat) | FAB interaction design, Material Design color schemes, menu layout |
+| [**WeXposed (微X模块)**](https://github.com/Xposed-Modules-Repo/com.fkzhang.wechatxposed) | fkzhang | Theme JSON config format, FAB item data model, icon file organization |
+
+Also follows [Material Design 3](https://m3.material.io/) guidelines.
