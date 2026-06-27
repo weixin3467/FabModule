@@ -3,6 +3,7 @@ package com.fabmodule
 import android.animation.ObjectAnimator
 import android.content.Intent
 import android.graphics.Color
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -22,6 +23,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     private var keepAliveRunnable: Runnable? = null
     private var menuOverlay: ViewGroup? = null
     private var fabView: View? = null
+    @Volatile private var snsUnreadCount = 0
     @Volatile private var isInChat = false
     @Volatile private var menuOpen = false
     private var density = -1f  // sentinel — forces recompute on first onResume
@@ -43,7 +45,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     val cls = a.javaClass.name
                     if (cls.contains("chatting") || cls.contains("ChattingUI") ||
                         (cls.startsWith("com.tencent.mm.ui.chatting.") && cls.length > 35)) {
-                        isInChat = true; stopKeepAlive(); removeFab()
+                        isInChat = true; stopKeepAlive(); removeOverlay(); removeFab()
                         return@hookAllMethods
                     }
                     if (!cls.contains("LauncherUI")) return@hookAllMethods
@@ -59,10 +61,20 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             val v = param.args[0] as? View ?: return
                             val parent = param.thisObject as? ViewGroup ?: return
-                            if (parent.height < 200) return
-                            val loc = IntArray(2); v.getLocationInWindow(loc)
-                            if (tryBlockTab(v, parent, loc))
-                            { v.visibility = View.GONE; v.setTag(0x7F100002, true) }
+                            // Check immediately if parent is already sized
+                            if (parent.height >= 200) {
+                                val loc = IntArray(2); v.getLocationInWindow(loc)
+                                if (tryBlockTab(v, parent, loc))
+                                { v.visibility = View.GONE; v.setTag(0x7F100002, true); return }
+                            }
+                            // Parent not laid out yet — defer until after layout
+                            v.post {
+                                val p = v.parent as? ViewGroup ?: return@post
+                                if (p.height < 200) return@post
+                                val loc = IntArray(2); v.getLocationInWindow(loc)
+                                if (tryBlockTab(v, p, loc))
+                                { v.visibility = View.GONE; v.setTag(0x7F100002, true) }
+                            }
                         }
                     })
                 de.robv.android.xposed.XposedBridge.hookAllMethods(vw, "setVisibility",
@@ -72,10 +84,20 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                             val v = param.thisObject as? View ?: return
                             if (v.getTag(0x7F100002) == true) { param.args[0] = View.GONE; return }
                             val parent = v.parent as? ViewGroup ?: return
-                            if (parent.height < 200) return
-                            val loc = IntArray(2); v.getLocationInWindow(loc)
-                            if (tryBlockTab(v, parent, loc))
-                            { param.args[0] = View.GONE; v.setTag(0x7F100002, true) }
+                            // Check immediately if parent is sized
+                            if (parent.height >= 200) {
+                                val loc = IntArray(2); v.getLocationInWindow(loc)
+                                if (tryBlockTab(v, parent, loc))
+                                { param.args[0] = View.GONE; v.setTag(0x7F100002, true); return }
+                            }
+                            // Defer if parent not laid out yet
+                            v.post {
+                                val p = v.parent as? ViewGroup ?: return@post
+                                if (p.height < 200) return@post
+                                val loc = IntArray(2); v.getLocationInWindow(loc)
+                                if (tryBlockTab(v, p, loc))
+                                { v.visibility = View.GONE; v.setTag(0x7F100002, true) }
+                            }
                         }
                     })
             } catch (_: Throwable) {}
@@ -136,8 +158,11 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     private fun ready(a: android.app.Activity) {
         if (isInChat) return
         hideTab(a); injectFab(a); startKeepAlive(a)
-        handler.postDelayed({ hideTab(a) }, 1500)
-        handler.postDelayed({ hideTab(a) }, 4000)
+        // Progressive retries — phones layout slower than emulators
+        handler.postDelayed({ hideTab(a) }, 100)
+        handler.postDelayed({ hideTab(a) }, 400)
+        handler.postDelayed({ hideTab(a) }, 1000)
+        handler.postDelayed({ hideTab(a) }, 2500)
     }
 
     // == Tab hiding ==
@@ -159,7 +184,9 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             val c = p.getChildAt(i) ?: continue
             val cn = c.javaClass.name
             if (cn.contains("Tab") || cn.contains("tab") || cn.contains("Bottom") || cn.contains("bottom")) {
-                if (c.isShown && c.width > 0) {
+                // Minimal: view has been measured (width>0). Don't require isShown —
+                // on phones the parent chain may not be fully visible yet.
+                if (c.width > 0 && c.height > 0) {
                     val loc = IntArray(2); c.getLocationInWindow(loc)
                     val b = loc[1] + c.height
                     if (c.width >= p.rootView.width * 0.95f && b in (p.rootView.height - 10)..(p.rootView.height + 10) && c.height in 40.dp..120.dp)
@@ -171,7 +198,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         return null
     }
 
-    // == KeepAlive ==
+    // == KeepAlive — self-limiting: stops when FAB is present ==
 
     private fun startKeepAlive(a: android.app.Activity) {
         stopKeepAlive()
@@ -179,8 +206,10 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             override fun run() {
                 try {
                     if (a.isFinishing || a.isDestroyed || isInChat) return
-                    (a.findViewById<ViewGroup>(android.R.id.content)
-                        ?: return).findViewWithTag<View>(TAG_FAB) ?: injectFab(a)
+                    val fab = (a.findViewById<ViewGroup>(android.R.id.content)
+                        ?: return).findViewWithTag<View>(TAG_FAB)
+                    if (fab != null) return  // FAB present, stop polling — save battery
+                    injectFab(a)
                     handler.postDelayed(this, 2000)
                 } catch (_: Throwable) { handler.postDelayed(this, 2000) }
             }
@@ -188,7 +217,8 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         keepAliveRunnable = r; handler.postDelayed(r, 2000)
     }
     private fun stopKeepAlive() { keepAliveRunnable?.let { handler.removeCallbacks(it) }; keepAliveRunnable = null }
-    private fun removeFab() { menuOverlay?.let { (it.parent as? ViewGroup)?.removeView(it) }; menuOverlay = null; menuOpen = false }
+    private fun removeOverlay() { menuOverlay?.let { (it.parent as? ViewGroup)?.removeView(it) }; menuOverlay = null }
+    private fun removeFab() { fabView?.let { (it.parent as? ViewGroup)?.removeView(it) }; fabView = null }
 
     // == FAB Button ==
 
@@ -204,7 +234,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 setPadding(pad, pad, pad, pad)
                 setBackgroundColor(Color.TRANSPARENT); isClickable = true; isFocusable = true
                 contentDescription = "快速菜单"
-                setOnClickListener { showMenu(a) }
+                setOnClickListener { if (menuOpen) dismissMenu() else showMenu(a) }
                 if (bmp != null) { setImageBitmap(bmp); setColorFilter(Color.WHITE) }
             }
             root.addView(iv, FrameLayout.LayoutParams(sz, sz).apply {
@@ -217,51 +247,90 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     // == Menu Popup ==
 
     private fun showMenu(a: android.app.Activity) {
+        val items = FabConfig.fabItems.ifEmpty { FabConfig.defaultItems }
+        Log.i("showMenu: ${items.size} config items, ${items.count { it.enable }} enabled")
         menuOpen = true; toggleFabIcon(toClose = true)
-        removeFab()
+        removeOverlay()           // clean up any stale overlay (keep FAB)
         val root = a.findViewById<ViewGroup>(android.R.id.content) ?: return
         val mW    = minOf(240.dp, screenW - 32.dp)
         val iconS = 28.dp; val fSize = 17f
         val pH    = 20.dp; val pV = 14.dp
         val rP    = 14.dp; val botM  = 155.dp; val rM = 16.dp
         val dH    = maxOf(1.dp, 1)
+        val rad   = 16.dp.toFloat()
 
         val overlay = FrameLayout(a).apply {
-            setOnClickListener { dismissMenu() }
+            setBackgroundColor(Color.parseColor("#40000000"))  // visual dim ONLY
+            isClickable = false; isFocusable = false           // pass through ALL touches
             alpha = 0f; animate().alpha(1f).setDuration(200).start()
         }
         val menu = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#DD1E1E1E"))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#DD1E1E1E"))
+                cornerRadius = rad
+            }
             setPadding(pH, pV, pH, pV)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                elevation = 8.dp.toFloat()
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: android.graphics.Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, rad)
+                    }
+                }
+                clipToOutline = true
+            }
             translationY = 120f
-            animate().translationY(0f).setDuration(250).setInterpolator(DecelerateInterpolator()).start()
+            animate().translationY(0f).setDuration(250)
+                .setInterpolator(DecelerateInterpolator()).start()
         }
-        val items = FabConfig.fabItems.ifEmpty { FabConfig.defaultItems }
+
+        refreshSnsUnread()
+        val badgeS = 18.dp
+        val rows = mutableListOf<View>()
         var idx = 0; val total = items.count { it.enable }
         for (item in items) {
             if (!item.enable) continue
             val row = LinearLayout(a).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                setPadding(rP, rP, rP, rP); setBackgroundColor(Color.TRANSPARENT)
-                minimumHeight = 48.dp
+                setPadding(rP, rP, rP, rP)
+                minimumHeight = 52.dp
                 isClickable = true; isFocusable = true
-                foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#10FFFFFF"))
+                foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#18FFFFFF"))
                 contentDescription = item.text
-                setOnClickListener { dismissMenu(); go(a, item) }
+                setOnClickListener { go(a, item); dismissMenu() }
+                // Stagger entry: hidden initially
+                alpha = 0f; translationY = 16f
             }
             iconKey(item.icon)?.let { FabConfig.iconBitmaps[it] }?.let { bmp ->
                 row.addView(ImageView(a).apply {
                     setImageBitmap(bmp); scaleType = ImageView.ScaleType.FIT_CENTER
                     setColorFilter(Color.WHITE); layoutParams = LinearLayout.LayoutParams(iconS, iconS)
-                    contentDescription = item.text
                     (layoutParams as LinearLayout.LayoutParams).marginEnd = 12.dp
                 })
             }
             row.addView(TextView(a).apply {
                 text = item.text; textSize = fSize; setTextColor(Color.WHITE)
             })
+            // Badge for 朋友圈 unread replies
+            if (item.type == "timeline" && snsUnreadCount > 0) {
+                val cnt = if (snsUnreadCount > 99) "99+" else snsUnreadCount.toString()
+                row.addView(TextView(a).apply {
+                    text = cnt; textSize = 11f
+                    setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(Color.parseColor("#FF453A")); shape =
+                            android.graphics.drawable.GradientDrawable.OVAL
+                    }
+                    val padH = if (cnt.length > 1) 4.dp else 0
+                    setPadding(padH, 0, padH, 0)
+                    layoutParams = LinearLayout.LayoutParams(badgeS, badgeS).apply {
+                        marginStart = 8.dp
+                    }
+                }, FrameLayout.LayoutParams(badgeS, badgeS))
+            }
             menu.addView(row)
+            rows += row
             if (++idx < total) menu.addView(View(a).apply {
                 setBackgroundColor(Color.parseColor("#30FFFFFF"))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dH))
@@ -271,11 +340,27 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         menuOverlay = overlay
+
+        // Staggered item entrance — cascading reveal
+        handler.post {
+            rows.forEachIndexed { i, row ->
+                row.animate()
+                    .alpha(1f).translationY(0f)
+                    .setStartDelay((i * 45).toLong())
+                    .setDuration(180)
+                    .setInterpolator(DecelerateInterpolator())
+                    .start()
+            }
+        }
     }
 
     private fun dismissMenu() {
+        if (!menuOpen) return
         menuOpen = false; toggleFabIcon(toClose = false)
-        removeFab()
+        // Animate overlay out; FAB stays (it's the toggle)
+        menuOverlay?.animate()?.alpha(0f)?.setDuration(150)
+            ?.withEndAction { removeOverlay() }?.start()
+            ?: removeOverlay()
     }
 
     private fun toggleFabIcon(toClose: Boolean) {
@@ -291,17 +376,54 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         }
     }
 
+    // == SNS unread count — try multiple known access patterns ==
+
+    private fun refreshSnsUnread() {
+        try {
+            snsUnreadCount = tryReadSnsUnread()
+        } catch (_: Throwable) {}
+    }
+
+    private fun tryReadSnsUnread(): Int {
+        val cl = lpparam.classLoader
+        // Pattern 1: static int fields
+        for ((cn, fn) in listOf(
+            "com.tencent.mm.plugin.sns.model.SnsCore" to "unreadCount",
+            "com.tencent.mm.plugin.sns.model.SnsCore" to "field_unreadCount",
+            "com.tencent.mm.plugin.sns.model.aj" to "unreadCount",
+        )) {
+            try {
+                val f = cl.loadClass(cn).getDeclaredField(fn)
+                f.isAccessible = true
+                val v = f.getInt(null)
+                if (v > 0) return v
+            } catch (_: Throwable) {}
+        }
+        // Pattern 2: static getter methods
+        for ((cn, mn) in listOf(
+            "com.tencent.mm.plugin.sns.model.SnsCore" to "getUnreadCount",
+            "com.tencent.mm.plugin.sns.model.SnsCore" to "ajUn",
+            "com.tencent.mm.plugin.sns.model.aj" to "getUnreadCount",
+        )) {
+            try {
+                val m = cl.loadClass(cn).getDeclaredMethod(mn)
+                m.isAccessible = true
+                val v = (m.invoke(null) as? Int) ?: 0
+                if (v > 0) return v
+            } catch (_: Throwable) {}
+        }
+        return 0
+    }
+
     // == Icon mapping ==
 
     private fun iconKey(icon: String): String? = when (icon) {
         "ic_sousuo.png"     -> "fab_search"
-        "ic_person_add.png" -> "fab_addfriend"
         "ic_chat.png"       -> "fab_groupchat"
         "ic_扫一扫.png"      -> "fab_scan"
         "ic_收付款.png"      -> "fab_wallet"
         "朋友圈.png"         -> "fab_timeline"
         "fab_search"        -> "fab_search"
-        "fab_addfriend"     -> "fab_addfriend"
         "fab_groupchat"     -> "fab_groupchat"
         "fab_scan"          -> "fab_scan"
         "fab_wallet"        -> "fab_wallet"
@@ -313,7 +435,12 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     private fun go(ctx: android.content.Context, item: FabConfig.FabItem) {
         try {
-            val cn = map[item.type] ?: return
+            Log.i("go: type=${item.type}, text=${item.text}")
+            val cn = map[item.type]
+            if (cn == null) {
+                Log.w("go: unknown type '${item.type}', not in map")
+                return
+            }
             when (item.type) {
                 "groupchat" -> ctx.startActivity(Intent().apply {
                     setClassName("com.tencent.mm", cn)
@@ -327,10 +454,10 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     }
                     if (ctx.packageManager.resolveActivity(intent, 0) != null)
                         ctx.startActivity(intent)
-                    else Log.w("Activity not found: $cn")
+                    else Log.w("go: Activity not found — $cn (type=${item.type})")
                 }
             }
-        } catch (_: Throwable) {}
+        } catch (t: Throwable) { Log.w("go: ${item.type} → ${t.javaClass.simpleName}: ${t.message}") }
     }
 
     private val map = mapOf(
@@ -338,7 +465,8 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         "timeline" to "com.tencent.mm.plugin.sns.ui.SnsTimeLineUI",
         "scan" to "com.tencent.mm.plugin.scanner.ui.BaseScanUI",
         "walletcoin" to "com.tencent.mm.plugin.offline.ui.WalletOfflineCoinPurseUI",
-        "addfriend" to "com.tencent.mm.plugin.subapp.ui.friend.AddMoreFriendsUI",
+
+        "groupchat" to "com.tencent.mm.ui.contact.SelectContactUI",
         "appbrand" to "com.tencent.mm.plugin.appbrand.ui.AppBrandLauncherUI",
         "favorite" to "com.tencent.mm.plugin.fav.ui.FavoriteIndexUI",
         "emoji" to "com.tencent.mm.plugin.emoji.ui.v3.EmojiStoreV3HomeUI",

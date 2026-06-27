@@ -4,7 +4,7 @@
   "FloatingActionButton": {
     "items": [
       {"text":"搜の索","order":0,"icon":"ic_sousuo.png","type":"search","enable":true},
-      {"text":"加好友","order":1,"icon":"ic_person_add.png","type":"addfriend","enable":true},
+
       {"text":"群の聊","order":2,"icon":"ic_chat.png","type":"groupchat","enable":true},
       {"text":"扫一扫","order":3,"icon":"ic_扫一扫.png","type":"scan","enable":true},
       {"text":"收付款","order":4,"icon":"ic_收付款.png","type":"walletcoin","enable":true},

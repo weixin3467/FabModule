@@ -21,7 +21,7 @@ object FabConfig {
     val defaultItems: List<FabItem>
         get() = listOf(
             FabItem("搜索",   "search",      "fab_search",    0, true),
-            FabItem("加好友", "addfriend",   "fab_addfriend", 1, true),
+
             FabItem("群聊",   "groupchat",   "fab_groupchat", 2, true),
             FabItem("扫一扫", "scan",        "fab_scan",      3, true),
             FabItem("收付款", "walletcoin",  "fab_wallet",    4, true),
@@ -30,7 +30,8 @@ object FabConfig {
 
     fun autoLoad() {
         fabItems = defaultItems
-        if (!findExternalConfig()) loadBuiltinConfig()
+        loadBuiltinConfig()                         // APK 内置优先
+        if (fabItems.isEmpty()) findExternalConfig() // SD 卡兜底
         loadBuiltinIcons()
         if (fabItems.isEmpty()) fabItems = defaultItems
     }
