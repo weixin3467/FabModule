@@ -112,7 +112,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         val cBot = loc[1] + v.height
         return cBot in (p.height - 10)..(p.height + 10) &&
                v.width >= p.width * 0.95f &&
-               v.layoutParams.height in 40.dp..120.dp
+               v.height in 40.dp..120.dp
     }
 
     // == Layout readiness ==
