@@ -75,7 +75,7 @@ app/src/main/
 
 ```bash
 cd FabModule
-JAVA_HOME=E:\apps\java\jdk17 ./gradlew clean assembleDebug
+./gradlew clean assembleDebug
 # Output: app/build/outputs/apk/debug/app-debug.apk (~898KB)
 ```
 
