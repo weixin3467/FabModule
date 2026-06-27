@@ -19,6 +19,13 @@ android {
         debug {
             isMinifyEnabled = false
         }
+        release {
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
     }
 
     compileOptions {
@@ -33,4 +40,5 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    testImplementation("junit:junit:4.13.2")
 }

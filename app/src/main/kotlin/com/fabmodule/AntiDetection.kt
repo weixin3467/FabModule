@@ -16,6 +16,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
  * 5. PackageManager.queryIntentActivities — hide ResolveInfo
  * 6. ActivityManager.getRunningServices — hide services
  * 7. System.getProperty / System.getenv — block Xposed environment variable leaks
+ * 8. FileInputStream("/proc/self/maps") — filter exposed shared-library entries
  */
 object AntiDetection {
 
@@ -178,8 +179,33 @@ object AntiDetection {
                     })
             }
             installed++; Log.i("AntiDetect: 7.props OK")
+
+        // 8. Block /proc/self/maps read — filter xposed/lsposed so entries
+        try {
+            val fisClass = java.io.FileInputStream::class.java
+            XposedHelpers.findAndHookConstructor(fisClass, String::class.java,
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val path = param.args[0] as? String ?: return
+                        if (path == "/proc/self/maps" || path.endsWith("/maps")) {
+                            // Create a clean copy of maps without xposed entries
+                            runCatching {
+                                val original = java.io.File(path).readLines()
+                                val filtered = original.filter { line ->
+                                    !hidePatterns.any { line.contains(it) }
+                                }
+                                val cleanFile = java.io.File.createTempFile("maps_clean", null)
+                                cleanFile.writeText(filtered.joinToString("\n"))
+                                cleanFile.deleteOnExit()
+                                param.args[0] = cleanFile.absolutePath
+                            }
+                        }
+                    }
+                })
+            installed++; Log.i("AntiDetect: 8.maps OK")
+        } catch (e: Exception) { Log.w("AntiDetect: maps ${e.message}") }
         } catch (e: Exception) { Log.w("AntiDetect: props ${e.message}") }
 
-        Log.i("AntiDetect: $installed/7 layers active")
+        Log.i("AntiDetect: $installed/8 layers active")
     }
 }
