@@ -97,15 +97,14 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         }
     }
 
-    // == Tab detection — class-name-first, layout-as-fallback ==
+    // == Tab detection — class-name match only (no layout-only fallback) ==
 
     private fun tryBlockTab(v: View, p: ViewGroup, loc: IntArray): Boolean {
-        // Try class-name match first
         val cn = v.javaClass.name
-        if (cn.contains("Tab") || cn.contains("tab") || cn.contains("Bottom") || cn.contains("bottom"))
-            if (tabLayoutMatch(v, p, loc)) return true
-        // Fallback: pure layout match (no class-name dependency)
-        return if (tabLayoutMatch(v, p, loc)) { Log.i("Tab fallback: ${v.javaClass.simpleName}"); true } else false
+        // MUST contain Tab/Bottom/tab/bottom — never hide by layout alone
+        if (!(cn.contains("Tab") || cn.contains("tab") || cn.contains("Bottom") || cn.contains("bottom")))
+            return false
+        return tabLayoutMatch(v, p, loc)
     }
 
     private fun tabLayoutMatch(v: View, p: ViewGroup, loc: IntArray): Boolean {
