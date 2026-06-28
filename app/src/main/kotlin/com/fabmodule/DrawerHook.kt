@@ -37,44 +37,110 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     // removal-signal processing before the first layout completes).
     private var hamburgerLaidOut = false
 
+    // Shared re-injection helper: extracts Activity from View/ViewGroup context
+    private fun reInjectHamburger(origin: Any) {
+        val a = when (origin) {
+            is View -> origin.context
+            is ViewGroup -> origin.context
+            else -> return
+        } as? android.app.Activity ?: return
+        injectionGen++; val gen = injectionGen
+        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 300)
+        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 1200)
+    }
+
     private val Int.dp: Int get() = (this * density + 0.5f).toInt()
 
-    // DEBUG: Broad spy — log ALL setVisibility→VISIBLE and addView for
-    // com.tencent.mm views so we can find the chat-page signal.
-    private val spyPhase = true   // set to false once we find the right signal
+    // Chat indicator views — when these are added, we're entering chat.
+    // When removed, we're leaving chat and should re-inject hamburger.
+    private val chatViewPatterns = listOf(
+        "com.tencent.mm.pluginsdk.ui.chat.ChattingUILayout",
+        "com.tencent.mm.ui.chatting.view.MMChattingListView",
+        "com.tencent.mm.pluginsdk.ui.chat.ChattingContent"
+    )
 
     override fun install() {
         if (!DrawerConfig.enable) return
 
-        // === Broad spy: log ALL view operations to discover chat signal ===
+        // Layer 1: addView chat view → first entry per session
         try {
-            val vwClass = lpparam.classLoader.loadClass("android.view.View")
-            // setVisibility spy — catches views being shown/hidden
-            de.robv.android.xposed.XposedBridge.hookAllMethods(vwClass, "setVisibility",
-                object : de.robv.android.xposed.XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val vis = param.args[0] as? Int ?: return
-                        if (vis != View.VISIBLE) return
-                        val v = param.thisObject as? View ?: return
-                        val cls = v.javaClass.name
-                        if (cls.startsWith("com.tencent.mm."))
-                            Log.i("Drawer: ▲VISIBLE $cls  w=${v.width} h=${v.height}")
-                    }
-                })
-            // addView spy — only log non-trivial views
             val vgClass = lpparam.classLoader.loadClass("android.view.ViewGroup")
             de.robv.android.xposed.XposedBridge.hookAllMethods(vgClass, "addView",
                 object : de.robv.android.xposed.XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val child = param.args[0] as? View ?: return
-                        val cls = child.javaClass.name
-                        if (cls.startsWith("com.tencent.mm.") &&
-                            cls != "com.tencent.mm.ui.widget.imageview.WeImageView")
-                            Log.i("Drawer: +addView $cls")
+                        if (chatViewPatterns.any { child.javaClass.name == it }) {
+                            Log.i("Drawer: +addView chat → remove")
+                            injectionGen++; removeHamburger()
+                            if (drawerOpen) closeDrawer()
+                        }
                     }
                 })
-            Log.i("Drawer: broad spy installed")
-        } catch (_: Throwable) { Log.w("Drawer: broad spy FAILED") }
+            Log.i("Drawer: addView chat spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: addView spy FAILED") }
+
+        // Layer 2: removeView chat view → leaving chat, re-inject
+        try {
+            val vgClass = lpparam.classLoader.loadClass("android.view.ViewGroup")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(vgClass, "removeView",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val child = param.args[0] as? View ?: return
+                        if (chatViewPatterns.any { child.javaClass.name == it }) {
+                            Log.i("Drawer: -removeView chat → re-inject")
+                            reInjectHamburger(param.thisObject)
+                        }
+                    }
+                })
+            Log.i("Drawer: removeView chat spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: removeView spy FAILED") }
+
+        // Layer 3: IME popup/hide
+        try {
+            val immClass = lpparam.classLoader.loadClass(
+                "android.view.inputmethod.InputMethodManager")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(immClass, "showSoftInput",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!hamburgerLaidOut) return
+                        Log.i("Drawer: IME show → remove")
+                        injectionGen++; removeHamburger()
+                        if (drawerOpen) closeDrawer()
+                    }
+                })
+            de.robv.android.xposed.XposedBridge.hookAllMethods(immClass, "hideSoftInputFromWindow",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (hamburgerView != null) return
+                        Log.i("Drawer: IME hide → re-inject")
+                        val a = ChatState.launcherActivity ?: return
+                        injectionGen++; val gen = injectionGen
+                        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 300)
+                        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 1200)
+                    }
+                })
+            Log.i("Drawer: IME spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: IME spy FAILED") }
+
+        // Layer 4: Focus spy — MMEditText gets focus when entering chat
+        // Catches subsequent entries where chat views are reused (no addView).
+        try {
+            val viewClass = lpparam.classLoader.loadClass("android.view.View")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(viewClass, "requestFocus",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!hamburgerLaidOut) return
+                        val cls = (param.thisObject as? View)?.javaClass?.name ?: return
+                        if (cls == "com.tencent.mm.ui.widget.MMEditText" ||
+                            cls == "com.tencent.mm.ui.widget.cedit.api.MMFlexEditText") {
+                            Log.i("Drawer: focus $cls → remove")
+                            injectionGen++; removeHamburger()
+                            if (drawerOpen) closeDrawer()
+                        }
+                    }
+                })
+            Log.i("Drawer: Focus spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: Focus spy FAILED") }
 
         // === Activity lifecycle — initial LauncherUI injection ===
         hookAllMethods("android.app.Activity", "onResume",
@@ -127,7 +193,7 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             val sz = 42.dp; val ml = 4.dp; val mt = 6.dp + statusBarH
             val lw = 20.dp; val lh = 3.dp; val lg = 5.dp
             val ctr = FrameLayout(a).apply {
-                tag = TAG_HAMBURGER; setBackgroundColor(Color.parseColor("#DD1976D2"))
+                tag = TAG_HAMBURGER; setBackgroundColor(Color.parseColor("#88000000"))
                 isClickable = true; isFocusable = true; elevation = 999f
                 setOnClickListener { toggleDrawer(a) }
             }
