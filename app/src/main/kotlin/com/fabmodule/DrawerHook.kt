@@ -2,6 +2,8 @@ package com.fabmodule
 
 import android.content.Intent
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -10,8 +12,10 @@ import android.widget.*
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 /**
- * Hamburger on decorView topmost. Hide when back button appears, show when gone.
- * Back button detection: scan decorView for a small clickable view at top-left.
+ * Drawer sidebar. Hamburger injected into decorView (window root).
+ * WeChat ActionBar covers top-left of android.R.id.content — only decorView
+ * floats above it reliably. Since decorView children persist across all
+ * screens, we explicitly remove the hamburger on non-LauncherUI resume.
  */
 class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
@@ -23,114 +27,136 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     private var drawerOverlay: ViewGroup? = null; private var drawerPanel: ViewGroup? = null
     private var density = 0f; private var statusBarH = 48
     private var drawerOpen = false
-    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var pollRunnable: Runnable? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    // Generation bumped on every LauncherUI enter/leave — any pending delayed
+    // injectHamburger call becomes a no-op after navigation away from LauncherUI.
+    private var injectionGen = 0
+
+    // Set to true once hamburger is successfully injected (prevents premature
+    // removal-signal processing before the first layout completes).
+    private var hamburgerLaidOut = false
 
     private val Int.dp: Int get() = (this * density + 0.5f).toInt()
+
+    // DEBUG: Broad spy — log ALL setVisibility→VISIBLE and addView for
+    // com.tencent.mm views so we can find the chat-page signal.
+    private val spyPhase = true   // set to false once we find the right signal
 
     override fun install() {
         if (!DrawerConfig.enable) return
 
+        // === Broad spy: log ALL view operations to discover chat signal ===
+        try {
+            val vwClass = lpparam.classLoader.loadClass("android.view.View")
+            // setVisibility spy — catches views being shown/hidden
+            de.robv.android.xposed.XposedBridge.hookAllMethods(vwClass, "setVisibility",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val vis = param.args[0] as? Int ?: return
+                        if (vis != View.VISIBLE) return
+                        val v = param.thisObject as? View ?: return
+                        val cls = v.javaClass.name
+                        if (cls.startsWith("com.tencent.mm."))
+                            Log.i("Drawer: ▲VISIBLE $cls  w=${v.width} h=${v.height}")
+                    }
+                })
+            // addView spy — only log non-trivial views
+            val vgClass = lpparam.classLoader.loadClass("android.view.ViewGroup")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(vgClass, "addView",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val child = param.args[0] as? View ?: return
+                        val cls = child.javaClass.name
+                        if (cls.startsWith("com.tencent.mm.") &&
+                            cls != "com.tencent.mm.ui.widget.imageview.WeImageView")
+                            Log.i("Drawer: +addView $cls")
+                    }
+                })
+            Log.i("Drawer: broad spy installed")
+        } catch (_: Throwable) { Log.w("Drawer: broad spy FAILED") }
+
+        // === Activity lifecycle — initial LauncherUI injection ===
         hookAllMethods("android.app.Activity", "onResume",
             onAfter = { p ->
                 val a = p.thisObject as? android.app.Activity ?: return@hookAllMethods
+                val cls = a.javaClass.name
+                if (!cls.startsWith("com.tencent.mm.")) return@hookAllMethods
+                Log.i("Drawer: resume $cls")
+
+                // Grab display metrics on every resume
                 val dm = a.resources.displayMetrics; density = dm.density
                 val resId = a.resources.getIdentifier("status_bar_height", "dimen", "android")
                 statusBarH = if (resId > 0) a.resources.getDimensionPixelSize(resId) else (24 * dm.density).toInt()
-                if (!a.javaClass.name.contains("LauncherUI")) return@hookAllMethods
-                injectHamburger(a)
-                startBackButtonPoll(a)
+
+                // Fallback for older WeChat that still uses separate ChattingUI Activity
+                if (cls.contains("chatting") || cls.contains("ChattingUI") ||
+                    cls.contains("chatroom") || cls.contains("ChatRoomUI") ||
+                    (cls.startsWith("com.tencent.mm.ui.chatting.") && cls.length > 35)) {
+                    Log.i("Drawer: in chat via Activity ($cls)")
+                    injectionGen++; removeHamburger();
+                    if (drawerOpen) closeDrawer()
+                    return@hookAllMethods
+                }
+
+                // Main LauncherUI — initial injection (subsequent returns handled by addView spy)
+                if (cls.contains("LauncherUI")) {
+                    injectionGen++
+                    val gen = injectionGen
+                    handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 300)
+                    handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 1200)
+                    handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 3000)
+                    return@hookAllMethods
+                }
+
+                // Any other WeChat Activity — remove
+                injectionGen++; removeHamburger();
+                if (drawerOpen) closeDrawer()
             })
+
         Log.i("Drawer: installed")
-    }
-
-    private fun startBackButtonPoll(a: android.app.Activity) {
-        pollRunnable?.let { handler.removeCallbacks(it) }
-        val r = object : Runnable {
-            override fun run() {
-                try {
-                    if (a.isDestroyed || a.isFinishing) return
-                    val hasBack = checkBackButton(a)
-                    if (hasBack && hamburgerView != null) {
-                        // Back button appeared → hide
-                        removeHamburger()
-                    } else if (!hasBack && hamburgerView == null) {
-                        // Back button gone → show
-                        injectHamburger(a)
-                    }
-                } catch (_: Throwable) {}
-                handler.postDelayed(this, 500)
-            }
-        }
-        pollRunnable = r
-        handler.postDelayed(r, 500)
-    }
-
-    // Scan decorView for a small clickable view at top-left (back button)
-    private fun checkBackButton(a: android.app.Activity): Boolean {
-        try {
-            val decor = a.window?.decorView as? ViewGroup ?: return false
-            val result = scanForBackBtn(decor, 10)
-            if (result) Log.i("DRW: backBtn detected")
-            return result
-        } catch (_: Throwable) { return false }
-    }
-
-    private fun scanForBackBtn(parent: ViewGroup, depth: Int): Boolean {
-        if (depth <= 0) return false
-        for (i in 0 until parent.childCount) {
-            val c = parent.getChildAt(i) ?: continue
-            // Small clickable view in top-left quadrant = back button
-            if (c.isClickable && c.isShown && c.width in 20.dp..160.dp && c.height in 20.dp..160.dp) {
-                val loc = IntArray(2); c.getLocationInWindow(loc)
-                if (loc[0] in 0..120.dp && loc[1] in (statusBarH - 10)..(statusBarH + 120.dp))
-                    return true
-            }
-            if (c is ViewGroup && scanForBackBtn(c, depth - 1)) return true
-        }
-        return false
-    }
-
-    private fun removeHamburger() {
-        hamburgerView?.let { try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {} }
-        hamburgerView = null; lineTop = null; lineMid = null; lineBot = null
-        Log.i("DRW: hamburger removed")
     }
 
     private fun injectHamburger(a: android.app.Activity) {
         try {
-            val decor = (a.window?.decorView as? ViewGroup) ?: return
-            if (decor.findViewWithTag<View>(TAG_HAMBURGER) != null) return
+            // decorView (window root) — floats above android.R.id.content
+            // where WeChat ActionBar covers the top-left corner.
+            val root = (a.window?.decorView as? ViewGroup) ?: return
+            if (root.findViewWithTag<View>(TAG_HAMBURGER) != null) return
 
-            val sz = 42.dp; val ml = 4.dp; val mt = statusBarH + 4.dp
+            val sz = 42.dp; val ml = 4.dp; val mt = 6.dp + statusBarH
             val lw = 20.dp; val lh = 3.dp; val lg = 5.dp
-
             val ctr = FrameLayout(a).apply {
                 tag = TAG_HAMBURGER; setBackgroundColor(Color.parseColor("#DD1976D2"))
                 isClickable = true; isFocusable = true; elevation = 999f
                 setOnClickListener { toggleDrawer(a) }
             }
-            lineTop = View(a).apply { setBackgroundColor(Color.WHITE) }.also {
-                ctr.addView(it, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; bottomMargin = lg }) }
-            lineMid = View(a).apply { setBackgroundColor(Color.WHITE) }.also {
-                ctr.addView(it, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER }) }
-            lineBot = View(a).apply { setBackgroundColor(Color.WHITE) }.also {
-                ctr.addView(it, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; topMargin = lg }) }
-
-            decor.addView(ctr, FrameLayout.LayoutParams(sz, sz).apply {
-                gravity = Gravity.START or Gravity.TOP; setMargins(ml, mt, 0, 0) })
-            ctr.bringToFront()
-            hamburgerView = ctr
+            lineTop = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineTop!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; bottomMargin = lg })
+            lineMid = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineMid!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER })
+            lineBot = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineBot!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; topMargin = lg })
+            root.addView(ctr, FrameLayout.LayoutParams(sz, sz).apply { gravity = Gravity.START or Gravity.TOP; setMargins(ml, mt, 0, 0) })
+            ctr.bringToFront(); hamburgerView = ctr
+            hamburgerLaidOut = true
             Log.i("Drawer: ☰")
         } catch (t: Throwable) { Log.w("Drawer ☰: ${t.message}") }
+    }
+
+    /** Remove hamburger from decorView (needed because decorView children persist). */
+    private fun removeHamburger() {
+        hamburgerLaidOut = false
+        hamburgerView?.let {
+            try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {}
+        }
+        hamburgerView = null
+        lineTop = null; lineMid = null; lineBot = null
     }
 
     private fun toggleDrawer(a: android.app.Activity) { if (drawerOpen) closeDrawer() else openDrawer(a) }
 
     private fun openDrawer(a: android.app.Activity) {
-        if (drawerOpen) return
-        removeOverlay(); drawerOpen = true; setArrowState(true)
+        if (drawerOpen) return; removeOverlay(); drawerOpen = true; setArrowState(true)
         val items = DrawerConfig.items.ifEmpty { DrawerConfig.defaultItems }.filter { it.enable }
+        // Drawer overlay on decorView topmost
         val root = (a.window?.decorView as? ViewGroup) ?: return
         val pw = (DrawerConfig.widthDp * density + 0.5f).toInt()
         val isz = 24.dp; val fs = 15f; val ph = 16.dp; val pv = 12.dp; val g = 1.dp
@@ -158,6 +184,6 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     }
 
     private fun resolveIconKey(icon: String): String { if (FabConfig.iconBitmaps.containsKey(icon)) return icon; return when (icon) { "ic_sousuo.png","fab_search"->"fab_search"; "ic_chat.png","fab_groupchat"->"fab_groupchat"; "ic_扫一扫.png","fab_scan"->"fab_scan"; "ic_收付款.png","fab_wallet"->"fab_wallet"; "朋友圈.png","fab_timeline"->"fab_timeline"; "tab_icon3.bak.png"->"drawer_contacts"; "shoucang1.png"->"drawer_favorite"; "表情商店.png"->"drawer_emoji"; "shezhu1.png"->"drawer_settings"; else -> icon } }
-    private fun go(ctx: android.content.Context, item: DrawerConfig.DrawerItem) { try { if (item.action.isNotEmpty() && item.type == "custom") { ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", item.action); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; when (item.type) { "tab_contacts"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm","com.tencent.mm.ui.contact.SelectContactUI"); putExtra("list_type", 1); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; "tab_me"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm","com.tencent.mm.ui.LauncherUI"); putExtra("LauncherUI.Show.Tab", 3); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP) }); return }; "groupchat"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm","com.tencent.mm.ui.contact.SelectContactUI"); putExtra("list_type", 0); putExtra("scene", 7); putExtra("list_attr", 4951); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; "switch_account"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm","com.tencent.mm.ui.account.LoginByQRScanUI"); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return } }; val cn = intentMap[item.type] ?: return; ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", cn); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Throwable) {} }
-    private val intentMap = mapOf("search" to "com.tencent.mm.plugin.fts.ui.FTSMainUI","timeline" to "com.tencent.mm.plugin.sns.ui.SnsTimeLineUI","scan" to "com.tencent.mm.plugin.scanner.ui.BaseScanUI","walletcoin" to "com.tencent.mm.plugin.offline.ui.WalletOfflineCoinPurseUI","wallet" to "com.tencent.mm.plugin.offline.ui.WalletOfflineCoinPurseUI","groupchat" to "com.tencent.mm.ui.contact.SelectContactUI","appbrand" to "com.tencent.mm.plugin.appbrand.ui.AppBrandLauncherUI","favorite" to "com.tencent.mm.plugin.fav.ui.FavoriteIndexUI","emoji" to "com.tencent.mm.plugin.emoji.ui.v3.EmojiStoreV3HomeUI","settings" to "com.tencent.mm.plugin.setting.ui.setting.SettingsUI","shake" to "com.tencent.mm.plugin.shake.ui.ShakeReportUI","snsuser" to "com.tencent.mm.plugin.sns.ui.SnsUserUI","nearbyfriends" to "com.tencent.mm.plugin.nearby.ui.NearbyFriendsUI","video_channels" to "com.tencent.mm.plugin.finder.ui.FinderHomeUI")
+    private fun go(ctx: android.content.Context, item: DrawerConfig.DrawerItem) { try { if (item.action.isNotEmpty() && item.type == "custom") { ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", item.action); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; when (item.type) { "tab_contacts"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", "com.tencent.mm.ui.contact.SelectContactUI"); putExtra("list_type", 1); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; "tab_me"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", "com.tencent.mm.ui.LauncherUI"); putExtra("LauncherUI.Show.Tab", 3); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP) }); return }; "groupchat"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", "com.tencent.mm.ui.contact.SelectContactUI"); putExtra("list_type", 0); putExtra("scene", 7); putExtra("list_attr", 4951); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return }; "switch_account"->{ ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", "com.tencent.mm.ui.account.LoginByQRScanUI"); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }); return } }; val cn = intentMap[item.type] ?: return; ctx.startActivity(Intent().apply { setClassName("com.tencent.mm", cn); addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) } catch (_: Throwable) {} }
+    private val intentMap = mapOf("search" to "com.tencent.mm.plugin.fts.ui.FTSMainUI", "timeline" to "com.tencent.mm.plugin.sns.ui.SnsTimeLineUI", "scan" to "com.tencent.mm.plugin.scanner.ui.BaseScanUI", "walletcoin" to "com.tencent.mm.plugin.offline.ui.WalletOfflineCoinPurseUI", "wallet" to "com.tencent.mm.plugin.offline.ui.WalletOfflineCoinPurseUI", "groupchat" to "com.tencent.mm.ui.contact.SelectContactUI", "appbrand" to "com.tencent.mm.plugin.appbrand.ui.AppBrandLauncherUI", "favorite" to "com.tencent.mm.plugin.fav.ui.FavoriteIndexUI", "emoji" to "com.tencent.mm.plugin.emoji.ui.v3.EmojiStoreV3HomeUI", "settings" to "com.tencent.mm.plugin.setting.ui.setting.SettingsUI", "shake" to "com.tencent.mm.plugin.shake.ui.ShakeReportUI", "snsuser" to "com.tencent.mm.plugin.sns.ui.SnsUserUI", "nearbyfriends" to "com.tencent.mm.plugin.nearby.ui.NearbyFriendsUI", "video_channels" to "com.tencent.mm.plugin.finder.ui.FinderHomeUI")
 }

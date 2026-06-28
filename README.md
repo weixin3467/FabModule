@@ -20,10 +20,15 @@
 - **隐藏微信底栏** — 类名 + 位置双重校验，延迟重试 + 持久拦截，快速不误伤
 - **聊天页自动隐藏 FAB** — 通过 ChattingUI Activity 检测，进聊天立即隐藏
 - **返回首页自动恢复** — onResume 触发注入，keepAlive 自限轮询（FAB 在则停，省电）
+- **🆕 左侧抽屉菜单** — 汉堡按钮 + 滑出抽屉面板（6 项：朋友圈/扫一扫/通讯录/收藏夹/表情/设置）
 - **8 层反检测** — 堆栈 / 进程 / 已安装应用 / 已安装包 / Intent / 服务 / 系统属性 / map 文件
 - **DPI 自适应布局** — Material Design dp 值 × Android density（dpi/160），所有分辨率自适应
 - **APK 自包含资源** — 配置和图标通过 ZipFile 从自有 APK 加载（APK 内置优先，SD 卡兜底）
 - **真机+模拟器双验证** — Xiaomi 13 (ARM64, Android 15) + 雷电模拟器 (Android 9)
+
+### 🚧 已知问题
+
+**抽屉在聊天页不会自动隐藏**（微信 8.0.65）。微信 8.0.65 是纯单 Activity 模式，导航全在 `LauncherUI` 内部完成，不创建新的 Activity、不触发 Fragment 生命周期、不改变 View visibility。抽屉按钮注入在 `decorView` 层，进入聊天后仍可见，会遮挡聊天页返回按钮。目前 FAB 不受影响（在 `android.R.id.content` 里自然被微信 View 层级覆盖）。
 
 ---
 
