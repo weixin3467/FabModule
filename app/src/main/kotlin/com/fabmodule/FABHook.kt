@@ -23,7 +23,6 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     private var keepAliveRunnable: Runnable? = null
     private var menuOverlay: ViewGroup? = null
     private var fabView: View? = null
-    @Volatile private var snsUnreadCount = 0
     @Volatile private var isInChat = false
     @Volatile private var menuOpen = false
     private var density = -1f  // sentinel — forces recompute on first onResume
@@ -51,6 +50,11 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                         (cls.startsWith("com.tencent.mm.ui.chatting.") && cls.length > 35)) {
                         Log.i("FAB: isInChat=true")
                         isInChat = true; ChatState.inChat = true; stopKeepAlive(); removeOverlay(); removeFab()
+                        return@hookAllMethods
+                    }
+                    // SnsTimeLineUI opened → badge cleared (user viewing Moments)
+                    if (cls.contains("SnsTimeLineUI")) {
+                        ChatState.snsUnreadCount = 0
                         return@hookAllMethods
                     }
                     if (!cls.contains("LauncherUI")) return@hookAllMethods
@@ -108,6 +112,21 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     })
             } catch (_: Throwable) {}
 
+            // Badge spy — hook ALL TextView.setText() calls, filter for
+            // small views at screen bottom with digit text. This catches
+            // badge updates even AFTER we hide the tab bar, and covers
+            // new-reply increments / read clears in real time.
+            try {
+                val tvClass = lpparam.classLoader.loadClass("android.widget.TextView")
+                de.robv.android.xposed.XposedBridge.hookAllMethods(tvClass, "setText",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            onBadgeSetText(param)
+                        }
+                    })
+                Log.i("Badge: TextView.setText hook OK")
+            } catch (_: Throwable) { Log.w("Badge: setText hook FAILED") }
+
             Log.i("Setup: hooks installed, awaiting LauncherUI resume")
         } catch (e: Throwable) { Log.w("Setup: ${e.message}") }
     }
@@ -163,8 +182,11 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     private fun ready(a: android.app.Activity) {
         if (isInChat) return
+        // Initial scan while tab bar is still visible; TextView.setText hook
+        // handles all subsequent updates (new replies, clears) in real time.
+        scanSnsBadgeOnce(a)
         hideTab(a); injectFab(a); startKeepAlive(a)
-        // Progressive retries — phones layout slower than emulators
+        // Progressive hide retries — phones layout slower than emulators
         handler.postDelayed({ hideTab(a) }, 100)
         handler.postDelayed({ hideTab(a) }, 400)
         handler.postDelayed({ hideTab(a) }, 1000)
@@ -202,6 +224,105 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             if (c is ViewGroup) { val r = findTabView(c, depth - 1); if (r != null) return r }
         }
         return null
+    }
+
+    // == SNS badge — initial scan + persistent setText hook ==
+
+    /**
+     * One-shot scan for initial unread count, runs BEFORE tab bar is hidden.
+     * After this, [onBadgeSetText] catches all future updates in real time.
+     */
+    private fun scanSnsBadgeOnce(a: android.app.Activity) {
+        try {
+            if (density <= 0f) return
+            val d = (a.window?.decorView as? ViewGroup) ?: return
+            val tabBar = findTabView(d, 10) ?: return
+            val tbLoc = IntArray(2); tabBar.getLocationInWindow(tbLoc)
+            val top = tbLoc[1]; val bot = top + tabBar.height
+            val left = tbLoc[0]; val w = tabBar.width
+            if (w <= 0) return
+
+            // Walk entire decorView to find badges in the tab region
+            val found = mutableListOf<Triple<View, Int, Int>>() // view, cx, count
+            collectBadgesNow(d, top, bot, found)
+
+            for ((_, cx, count) in found) {
+                val section = ((cx - left) * 4) / w
+                if (section == 2) { // 发现 tab
+                    ChatState.snsUnreadCount = count
+                    Log.i("Badge init: 发现 tab count=$count")
+                    return
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun collectBadgesNow(v: View, tbTop: Int, tbBottom: Int,
+                                  out: MutableList<Triple<View, Int, Int>>) {
+        if (v is TextView && v.width in 8.dp..40.dp && v.height in 8.dp..26.dp) {
+            val text = v.text?.toString() ?: ""
+            if (text.any { it.isDigit() } && v.background != null) {
+                val loc = IntArray(2); v.getLocationInWindow(loc)
+                if (loc[1] in tbTop..tbBottom) {
+                    val count = if (text.endsWith("+")) text.dropLast(1).toIntOrNull() ?: 99
+                                else text.toIntOrNull() ?: 0
+                    out.add(Triple(v, loc[0] + v.width / 2, count))
+                    return
+                }
+            }
+        }
+        if (v !is TextView && v.width in 6.dp..16.dp && v.height in 6.dp..16.dp
+            && v.background != null) {
+            val loc = IntArray(2); v.getLocationInWindow(loc)
+            if (loc[1] in tbTop..tbBottom) {
+                out.add(Triple(v, loc[0] + v.width / 2, 1))
+                return
+            }
+        }
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) {
+                v.getChildAt(i)?.let { collectBadgesNow(it, tbTop, tbBottom, out) }
+            }
+        }
+    }
+
+    /**
+     * Hooked on ALL TextView.setText() calls. When WeChat updates a badge
+     * anywhere on screen, we check: small view + bottom ~15% + has digits.
+     * Works regardless of tab bar visibility — event-driven, zero polling.
+     */
+    private fun onBadgeSetText(param: de.robv.android.xposed.XC_MethodHook.MethodHookParam) {
+        try {
+            if (density <= 0f) return
+            val v = param.thisObject as? TextView ?: return
+            if (v.width !in 8.dp..40.dp || v.height !in 8.dp..26.dp) return
+            if (v.background == null) return
+
+            val text = param.args.getOrNull(0)?.toString() ?: return
+            val loc = IntArray(2); v.getLocationInWindow(loc)
+
+            // Must be in bottom ~15% of screen (tab bar region)
+            if (loc[1] < screenH * 0.85f) return
+
+            val count = when {
+                text.isEmpty() -> 0  // badge cleared
+                text.any { it.isDigit() } -> {
+                    if (text.endsWith("+")) text.dropLast(1).toIntOrNull() ?: 99
+                    else text.toIntOrNull() ?: 0
+                }
+                else -> return  // not a badge (e.g. tab label)
+            }
+
+            // Guess tab section by X position (0..3)
+            val cx = loc[0] + v.width / 2
+            val section = (cx * 4) / screenW
+            if (section != 2) return  // not 发现 tab
+
+            if (ChatState.snsUnreadCount != count) {
+                ChatState.snsUnreadCount = count
+                Log.i("Badge event: section=$section count=$count text='$text'")
+            }
+        } catch (_: Throwable) {}
     }
 
     // == KeepAlive — self-limiting: stops when FAB is present ==
@@ -291,8 +412,6 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 .setInterpolator(DecelerateInterpolator()).start()
         }
 
-        refreshSnsUnread()
-        val badgeS = 18.dp
         val rows = mutableListOf<View>()
         var idx = 0; val total = items.count { it.enable }
         for (item in items) {
@@ -318,22 +437,25 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             row.addView(TextView(a).apply {
                 text = item.text; textSize = fSize; setTextColor(Color.WHITE)
             })
-            // Badge for 朋友圈 unread replies
-            if (item.type == "timeline" && snsUnreadCount > 0) {
-                val cnt = if (snsUnreadCount > 99) "99+" else snsUnreadCount.toString()
-                row.addView(TextView(a).apply {
-                    text = cnt; textSize = 11f
-                    setTextColor(Color.WHITE); gravity = Gravity.CENTER
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(Color.parseColor("#FF453A")); shape =
-                            android.graphics.drawable.GradientDrawable.OVAL
-                    }
-                    val padH = if (cnt.length > 1) 4.dp else 0
-                    setPadding(padH, 0, padH, 0)
-                    layoutParams = LinearLayout.LayoutParams(badgeS, badgeS).apply {
+            // Badge for 朋友圈 unread (from bottom-tab scan)
+            if (item.type == "timeline") {
+                val unread = ChatState.snsUnreadCount
+                if (unread > 0) {
+                    val cnt = if (unread > 99) "99+" else unread.toString()
+                    val badgeS = 18.dp
+                    row.addView(TextView(a).apply {
+                        text = cnt; textSize = 11f
+                        setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                        background = android.graphics.drawable.GradientDrawable().apply {
+                            setColor(Color.parseColor("#FF453A"))
+                            shape = android.graphics.drawable.GradientDrawable.OVAL
+                        }
+                        val padH = if (cnt.length > 1) 4.dp else 0
+                        setPadding(padH, 0, padH, 0)
+                    }, LinearLayout.LayoutParams(badgeS, badgeS).apply {
                         marginStart = 8.dp
-                    }
-                }, FrameLayout.LayoutParams(badgeS, badgeS))
+                    })
+                }
             }
             menu.addView(row)
             rows += row
@@ -380,45 +502,6 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 duration = 200; start()
             }
         }
-    }
-
-    // == SNS unread count — try multiple known access patterns ==
-
-    private fun refreshSnsUnread() {
-        try {
-            snsUnreadCount = tryReadSnsUnread()
-        } catch (_: Throwable) {}
-    }
-
-    private fun tryReadSnsUnread(): Int {
-        val cl = lpparam.classLoader
-        // Pattern 1: static int fields
-        for ((cn, fn) in listOf(
-            "com.tencent.mm.plugin.sns.model.SnsCore" to "unreadCount",
-            "com.tencent.mm.plugin.sns.model.SnsCore" to "field_unreadCount",
-            "com.tencent.mm.plugin.sns.model.aj" to "unreadCount",
-        )) {
-            try {
-                val f = cl.loadClass(cn).getDeclaredField(fn)
-                f.isAccessible = true
-                val v = f.getInt(null)
-                if (v > 0) return v
-            } catch (_: Throwable) {}
-        }
-        // Pattern 2: static getter methods
-        for ((cn, mn) in listOf(
-            "com.tencent.mm.plugin.sns.model.SnsCore" to "getUnreadCount",
-            "com.tencent.mm.plugin.sns.model.SnsCore" to "ajUn",
-            "com.tencent.mm.plugin.sns.model.aj" to "getUnreadCount",
-        )) {
-            try {
-                val m = cl.loadClass(cn).getDeclaredMethod(mn)
-                m.isAccessible = true
-                val v = (m.invoke(null) as? Int) ?: 0
-                if (v > 0) return v
-            } catch (_: Throwable) {}
-        }
-        return 0
     }
 
     // == Icon mapping ==
