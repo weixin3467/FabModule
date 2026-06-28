@@ -4,7 +4,7 @@
 > 微信悬浮按钮（FAB）独立模块 — LSPosed/Xposed 插件  
 > [Switch to English](#fabmodule-1)
 
-**906 行 Kotlin · ~890KB APK · 零外部依赖 · 仅一个 `compileOnly` Xposed API**
+**1313 行 Kotlin · ~890KB APK · 零外部依赖 · 仅一个 `compileOnly` Xposed API**
 
 > ⚠️ **免责声明**: 本项目**仅供学习和技术研究使用**，禁止用于任何商业用途或违反微信服务条款的行为。使用者需自行承担所有风险和责任。
 >
@@ -20,10 +20,25 @@
 - **隐藏微信底栏** — 类名 + 位置双重校验，延迟重试 + 持久拦截，快速不误伤
 - **聊天页自动隐藏 FAB** — 通过 ChattingUI Activity 检测，进聊天立即隐藏
 - **返回首页自动恢复** — onResume 触发注入，keepAlive 自限轮询（FAB 在则停，省电）
+- **🆕 左侧抽屉菜单** — 汉堡按钮 + 滑出抽屉面板（6 项：朋友圈/扫一扫/通讯录/收藏夹/表情/设置）
 - **8 层反检测** — 堆栈 / 进程 / 已安装应用 / 已安装包 / Intent / 服务 / 系统属性 / map 文件
 - **DPI 自适应布局** — Material Design dp 值 × Android density（dpi/160），所有分辨率自适应
 - **APK 自包含资源** — 配置和图标通过 ZipFile 从自有 APK 加载（APK 内置优先，SD 卡兜底）
 - **真机+模拟器双验证** — Xiaomi 13 (ARM64, Android 15) + 雷电模拟器 (Android 9)
+
+### 🚧 已知问题
+
+**抽屉聊天页检测（部分可用）**：
+
+| 场景 | 检测方式 | 状态 |
+|------|---------|------|
+| 首次进入聊天 | `addView(ChattingUILayout/MMChattingListView/ChattingContent)` | ✅ 汉堡自动移除 |
+| 返回主页 | `removeView` 聊天 View / `IME hide` | ✅ 汉堡自动恢复 |
+| 再次进入聊天 | `MMEditText.requestFocus` / `IME show` | ⚠️ 需点输入框触发 |
+
+**根因**：微信 8.0.65 是纯单 Activity 模式（LauncherUI），聊天 View 在首次添加后即被复用，不再触发 `addView`。Focus spy 和 IME spy 作为兜底方案可覆盖大部分场景，但不够完美。FAB 不受影响（在 `android.R.id.content` 里自然被微信 View 层级覆盖）。
+
+**Android 15 适配**：✅ 已完全适配。compileSdk/targetSdk 35 + Zygote modulePath 捕获绕过包可见性限制 + 8层反检测。
 
 ---
 
