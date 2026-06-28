@@ -43,13 +43,19 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     val dm = a.resources.displayMetrics
                     density = dm.density; screenW = dm.widthPixels; screenH = dm.heightPixels
                     val cls = a.javaClass.name
+                    // Log ALL Activity onResume — no filter, so we see the REAL chat class
+                    Log.i("ACTIVITY: $cls")
                     if (cls.contains("chatting") || cls.contains("ChattingUI") ||
+                        cls.contains("chatroom") || cls.contains("ChatRoomUI") ||
+                        cls.contains("MainUI") ||
                         (cls.startsWith("com.tencent.mm.ui.chatting.") && cls.length > 35)) {
-                        isInChat = true; stopKeepAlive(); removeOverlay(); removeFab()
+                        Log.i("FAB: isInChat=true")
+                        isInChat = true; ChatState.inChat = true; stopKeepAlive(); removeOverlay(); removeFab()
                         return@hookAllMethods
                     }
                     if (!cls.contains("LauncherUI")) return@hookAllMethods
-                    isInChat = false; layoutDone = false; waitLayout(a)
+                    isInChat = false; ChatState.inChat = false; ChatState.launcherActivity = a
+                    layoutDone = false; waitLayout(a)
                 })
 
             // Tab hiding hooks

@@ -24,6 +24,10 @@ class Entry : IXposedHookLoadPackage, IXposedHookZygoteInit {
             FabConfig.autoLoad()
             FABHook(lpparam).install()
 
+            // Drawer sidebar (left-side sliding panel, uses FabConfig icons)
+            DrawerConfig.autoLoad()
+            DrawerHook(lpparam).install()
+
             Log.i("======== FabModule ready ========")
         } catch (t: Throwable) {
             Log.e("FabModule FATAL: ${t.javaClass.name}: ${t.message}")

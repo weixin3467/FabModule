@@ -1,0 +1,13 @@
+{
+  "enable": true,
+  "width": 180,
+  "autoClose": true,
+  "items": [
+    {"text":"朋友圈", "type":"timeline", "icon":"fab_timeline", "enable":true},
+    {"text":"扫一扫", "type":"scan", "icon":"fab_scan", "enable":true},
+    {"text":"通讯录", "type":"tab_contacts", "icon":"drawer_contacts", "enable":true},
+    {"text":"收藏夹", "type":"favorite", "icon":"drawer_favorite", "enable":true},
+    {"text":"表情", "type":"emoji", "icon":"drawer_emoji", "enable":true},
+    {"text":"设置", "type":"settings", "icon":"drawer_settings", "enable":true}
+  ]
+}

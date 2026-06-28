@@ -80,7 +80,8 @@ object FabConfig {
                 while (entries.hasMoreElements()) {
                     val e = entries.nextElement()
                     val n = e.name
-                    if (n.startsWith("res/drawable/fab_") && n.endsWith(".png")) {
+                    val isIcon = (n.startsWith("res/drawable/fab_") || n.startsWith("res/drawable/drawer_")) && n.endsWith(".png")
+                    if (isIcon) {
                         iconBitmaps[n.substringAfterLast("/").removeSuffix(".png")] =
                             BitmapFactory.decodeStream(zf.getInputStream(e)) ?: continue
                     }
