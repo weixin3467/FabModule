@@ -36,6 +36,11 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             // Validate critical WeChat Activity classes on startup
             validateClasses(lpparam.classLoader)
 
+            // Fragment lifecycle hooks for 8.0.65+ (ChattingUI is Fragment, not Activity)
+            // Try all three Fragment base classes — support-v4 on older Android,
+            // AndroidX on newer, android.app.Fragment as last resort.
+            installFragmentHooks()
+
             hookAllMethods("android.app.Activity", "onResume",
                 onAfter = { p ->
                     val a = p.thisObject as? android.app.Activity ?: return@hookAllMethods
@@ -127,11 +132,132 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 Log.i("Badge: TextView.setText hook OK")
             } catch (_: Throwable) { Log.w("Badge: setText hook FAILED") }
 
+            // Layer 5: View.setVisibility — catches Fragment.show()/hide().
+            // WeChat 8.0.65 ChattingUIFragment root View gets setVisibility
+            // toggled by FragmentManager. StackTrace check catches it.
+            try {
+                val viewClass = lpparam.classLoader.loadClass("android.view.View")
+                de.robv.android.xposed.XposedBridge.hookAllMethods(viewClass, "setVisibility",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val newVis = param.args[0] as? Int ?: return
+                            val v = param.thisObject as? View ?: return
+                            if (v.width < 300 || v.height < 300) return
+                            val st = Thread.currentThread().stackTrace
+                            if (!st.any { f -> f.className.let { c ->
+                                c.contains("chatting") || c.contains("ChattingUI") ||
+                                c.contains("Chatting") || c.contains("chatroom")
+                            }}) return
+                            when (newVis) {
+                                View.VISIBLE -> {
+                                    Log.i("FAB: L5 setVisibility(VISIBLE) → hide")
+                                    isInChat = true; ChatState.inChat = true
+                                    stopKeepAlive(); removeOverlay(); removeFab()
+                                }
+                                View.GONE, View.INVISIBLE -> {
+                                    Log.i("FAB: L5 setVisibility(GONE) → re-inject")
+                                    isInChat = false; ChatState.inChat = false
+                                    val a = ChatState.launcherActivity ?: return
+                                    if (a.isFinishing || a.isDestroyed) return
+                                    handler.postDelayed({ injectFab(a) }, 300)
+                                    handler.postDelayed({ injectFab(a) }, 800)
+                                    handler.postDelayed({ startKeepAlive(a) }, 1200)
+                                }
+                            }
+                        }
+                    })
+                Log.i("FAB: L5 View.setVisibility spy OK")
+            } catch (_: Throwable) { Log.w("FAB: L5 setVisibility spy FAILED") }
+
             Log.i("Setup: hooks installed, awaiting LauncherUI resume")
         } catch (e: Throwable) { Log.w("Setup: ${e.message}") }
     }
 
     // == Startup validation ==
+
+    /** Check if a Fragment is WeChat's chat UI (ChattingUIFragment / BaseChattingUIFragment). */
+    private fun isChatFragment(fragment: Any): Boolean {
+        var cls: Class<*>? = fragment.javaClass
+        while (cls != null && cls.name.startsWith("com.tencent.mm.")) {
+            val name = cls.name
+            if (name.contains("ChattingUI") || name.contains("chatting") ||
+                name.contains("ChatRoomUI") || name.contains("chatroom"))
+                return true
+            cls = cls.superclass
+        }
+        return false
+    }
+
+    /**
+     * Install Fragment lifecycle hooks on ALL Fragment base classes.
+     * Hooks both public onResume/onPause AND internal performResume/performPause
+     * to catch WeChat fragments that override lifecycle methods without super.
+     */
+    private fun installFragmentHooks() {
+        val candidates = listOf(
+            "androidx.fragment.app.Fragment" to "androidx",
+            "android.support.v4.app.Fragment" to "support-v4",
+            "android.app.Fragment" to "android.app"
+        )
+        var hooked = 0
+        for ((className, label) in candidates) {
+            try {
+                val fragClass = lpparam.classLoader.loadClass(className)
+
+                // Public hooks (may be overridden without super)
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onResume",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("FAB: L0($label) onResume → hide")
+                            isInChat = true; ChatState.inChat = true
+                            stopKeepAlive(); removeOverlay(); removeFab()
+                        }
+                    })
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onPause",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("FAB: L0($label) onPause → re-inject")
+                            isInChat = false; ChatState.inChat = false
+                            val a = ChatState.launcherActivity ?: return
+                            if (a.isFinishing || a.isDestroyed) return
+                            handler.postDelayed({ injectFab(a) }, 300)
+                            handler.postDelayed({ injectFab(a) }, 800)
+                            handler.postDelayed({ startKeepAlive(a) }, 1200)
+                        }
+                    })
+
+                // Internal dispatch hooks — called by FragmentManager,
+                // never overridden by subclasses (package-private/final).
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performResume",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("FAB: L0($label) performResume → hide")
+                            isInChat = true; ChatState.inChat = true
+                            stopKeepAlive(); removeOverlay(); removeFab()
+                        }
+                    })
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performPause",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("FAB: L0($label) performPause → re-inject")
+                            isInChat = false; ChatState.inChat = false
+                            val a = ChatState.launcherActivity ?: return
+                            if (a.isFinishing || a.isDestroyed) return
+                            handler.postDelayed({ injectFab(a) }, 300)
+                            handler.postDelayed({ injectFab(a) }, 800)
+                            handler.postDelayed({ startKeepAlive(a) }, 1200)
+                        }
+                    })
+                hooked++
+            } catch (_: Throwable) {}
+        }
+        if (hooked > 0) Log.i("FAB: L0 Fragment spy OK ($hooked bases × 4 hooks each)")
+        else Log.w("FAB: L0 Fragment spy FAILED")
+    }
 
     private fun validateClasses(cl: ClassLoader) {
         val critical = listOf(

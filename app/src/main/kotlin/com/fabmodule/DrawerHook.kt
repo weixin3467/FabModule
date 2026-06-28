@@ -53,6 +53,95 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     // Chat indicator views — when these are added, we're entering chat.
     // When removed, we're leaving chat and should re-inject hamburger.
+    /** Check if a Fragment is WeChat's chat UI (ChattingUIFragment / BaseChattingUIFragment). */
+    private fun isChatFragment(fragment: Any): Boolean {
+        var cls: Class<*>? = fragment.javaClass
+        while (cls != null && cls.name.startsWith("com.tencent.mm.")) {
+            val name = cls.name
+            if (name.contains("ChattingUI") || name.contains("chatting") ||
+                name.contains("ChatRoomUI") || name.contains("chatroom"))
+                return true
+            cls = cls.superclass
+        }
+        return false
+    }
+
+    /**
+     * Install Fragment lifecycle hooks on ALL Fragment base classes.
+     * We hook BOTH the public onResume/onPause (for fragments that call super)
+     * AND the internal performResume/performPause (for fragments that override
+     * lifecycle methods without calling super, as WeChat 8.0.65 does).
+     */
+    private fun installFragmentHooks() {
+        val candidates = listOf(
+            "androidx.fragment.app.Fragment" to "androidx",
+            "android.support.v4.app.Fragment" to "support-v4",
+            "android.app.Fragment" to "android.app"
+        )
+        var hooked = 0
+        for ((className, label) in candidates) {
+            try {
+                val fragClass = lpparam.classLoader.loadClass(className)
+
+                // Public onResume/onPause — may be overridden without super
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onResume",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("Drawer: L0($label) onResume → remove")
+                            injectionGen++; removeHamburger()
+                            if (drawerOpen) closeDrawer()
+                        }
+                    })
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onPause",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            if (hamburgerView != null) return
+                            Log.i("Drawer: L0($label) onPause → re-inject")
+                            handler.postDelayed({
+                                if (hamburgerView == null) {
+                                    val a = ChatState.launcherActivity ?: return@postDelayed
+                                    injectionGen++; val gen = injectionGen
+                                    if (injectionGen == gen) injectHamburger(a)
+                                }
+                            }, 500)
+                        }
+                    })
+
+                // Internal performResume/performPause — called by FragmentManager,
+                // never overridden by subclasses. Catches even super-skipping fragments.
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performResume",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            Log.i("Drawer: L0($label) performResume → remove")
+                            injectionGen++; removeHamburger()
+                            if (drawerOpen) closeDrawer()
+                        }
+                    })
+                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performPause",
+                    object : de.robv.android.xposed.XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!isChatFragment(param.thisObject)) return
+                            if (hamburgerView != null) return
+                            Log.i("Drawer: L0($label) performPause → re-inject")
+                            handler.postDelayed({
+                                if (hamburgerView == null) {
+                                    val a = ChatState.launcherActivity ?: return@postDelayed
+                                    injectionGen++; val gen = injectionGen
+                                    if (injectionGen == gen) injectHamburger(a)
+                                }
+                            }, 500)
+                        }
+                    })
+                hooked++
+            } catch (_: Throwable) {}
+        }
+        if (hooked > 0) Log.i("Drawer: L0 Fragment spy OK ($hooked bases × 4 hooks each)")
+        else Log.w("Drawer: L0 Fragment spy FAILED")
+    }
+
     private val chatViewPatterns = listOf(
         "com.tencent.mm.pluginsdk.ui.chat.ChattingUILayout",
         "com.tencent.mm.ui.chatting.view.MMChattingListView",
@@ -61,6 +150,22 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     override fun install() {
         if (!DrawerConfig.enable) return
+
+        // ═══════════════════════════════════════════════════════════
+        // Layer 0: Fragment lifecycle — primary detection for 8.0.65+
+        // ═══════════════════════════════════════════════════════════
+        // WeChat 8.0.65: ChattingUI changed from Activity to Fragment
+        // (ChattingUIFragment extends BaseChattingUIFragment).
+        // Fragment.show() / hide() reuses the same View tree — addView
+        // fires only on first creation, never on subsequent entries.
+        // Fragment.onResume() fires EVERY time the chat becomes visible,
+        // including on FragmentTransaction.show().
+        //
+        // Try all three Fragment base classes — WeChat may use AndroidX,
+        // old support-v4, or deprecated android.app.Fragment depending on
+        // the target device API level.
+        // ═══════════════════════════════════════════════════════════
+        installFragmentHooks()
 
         // Layer 1: addView chat view → first entry per session
         try {
@@ -141,6 +246,52 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 })
             Log.i("Drawer: Focus spy OK")
         } catch (_: Throwable) { Log.w("Drawer: Focus spy FAILED") }
+
+        // Layer 5: View.setVisibility — catches Fragment.show()/hide().
+        // When WeChat 8.0.65 shows/hides ChattingUIFragment via FragmentTransaction,
+        // the fragment's root View gets setVisibility(VISIBLE/GONE). Our Fragment
+        // base-class hooks never fire because WeChat overrides onResume without super.
+        // StackTrace check (like XModule RemoveSelectionLimit) catches the fragment
+        // manager dispatch from code paths containing "chatting".
+        try {
+            val viewClass = lpparam.classLoader.loadClass("android.view.View")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(viewClass, "setVisibility",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!hamburgerLaidOut) return
+                        val newVis = param.args[0] as? Int ?: return
+                        val v = param.thisObject as? View ?: return
+                        // Filter: only large views (fragment-roots, >half screen)
+                        if (v.width < 300 || v.height < 300) return
+                        val st = Thread.currentThread().stackTrace
+                        val inChatContext = st.any { f ->
+                            val cn = f.className
+                            cn.contains("chatting") || cn.contains("ChattingUI") ||
+                            cn.contains("Chatting") || cn.contains("chatroom")
+                        }
+                        if (!inChatContext) return
+                        when (newVis) {
+                            View.VISIBLE -> {
+                                Log.i("Drawer: L5 setVisibility(VISIBLE) chat → remove")
+                                injectionGen++; removeHamburger()
+                                if (drawerOpen) closeDrawer()
+                            }
+                            View.GONE, View.INVISIBLE -> {
+                                if (hamburgerView != null) return
+                                Log.i("Drawer: L5 setVisibility(GONE) chat → re-inject")
+                                handler.postDelayed({
+                                    if (hamburgerView == null) {
+                                        val a = ChatState.launcherActivity ?: return@postDelayed
+                                        injectionGen++; val gen = injectionGen
+                                        if (injectionGen == gen) injectHamburger(a)
+                                    }
+                                }, 500)
+                            }
+                        }
+                    }
+                })
+            Log.i("Drawer: L5 View.setVisibility spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: L5 setVisibility spy FAILED") }
 
         // === Activity lifecycle — initial LauncherUI injection ===
         hookAllMethods("android.app.Activity", "onResume",
