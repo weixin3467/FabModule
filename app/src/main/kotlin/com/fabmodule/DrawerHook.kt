@@ -351,6 +351,15 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             lineTop = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineTop!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; bottomMargin = lg })
             lineMid = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineMid!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER })
             lineBot = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineBot!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; topMargin = lg })
+            // Red dot indicator (top-right) — shown when Moments or Contacts has unread
+            val dotSz = 8.dp; val dot = View(a).apply {
+                setBackgroundColor(Color.parseColor("#FF453A"))
+                visibility = View.GONE
+            }
+            ctr.addView(dot, FrameLayout.LayoutParams(dotSz, dotSz).apply {
+                gravity = Gravity.END or Gravity.TOP; setMargins(0, 2.dp, 2.dp, 0)
+            })
+            ChatState.hamburgerDot = dot; ChatState.updateHamburgerDot()
             root.addView(ctr, FrameLayout.LayoutParams(sz, sz).apply { gravity = Gravity.START or Gravity.TOP; setMargins(ml, mt, 0, 0) })
             ctr.bringToFront(); hamburgerView = ctr
             hamburgerLaidOut = true
@@ -361,6 +370,7 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     /** Remove hamburger from decorView (needed because decorView children persist). */
     private fun removeHamburger() {
         hamburgerLaidOut = false
+        ChatState.hamburgerDot = null
         hamburgerView?.let {
             try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {}
         }
@@ -383,7 +393,7 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         pn.addView(View(a).apply { setBackgroundColor(Color.parseColor("#30FFFFFF")) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g))
         val sc = ScrollView(a).apply { isVerticalScrollBarEnabled = false }
         val ls = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
-        for (itm in items) { val rw = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(ph, pv, ph, pv); minimumHeight = 48.dp; isClickable = true; isFocusable = true; foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#18FFFFFF")); setOnClickListener { go(a, itm); if (DrawerConfig.autoClose) closeDrawer() } }; val bm = FabConfig.iconBitmaps[resolveIconKey(itm.icon)]; if (bm != null) rw.addView(ImageView(a).apply { setImageBitmap(bm); scaleType = ImageView.ScaleType.FIT_CENTER; setColorFilter(Color.WHITE); layoutParams = LinearLayout.LayoutParams(isz, isz).apply { marginEnd = ph } }); rw.addView(TextView(a).apply { text = itm.text; textSize = fs; setTextColor(Color.WHITE) }); if (itm.type == "timeline") { val unread = ChatState.snsUnreadCount; if (unread > 0) { val cnt = if (unread > 99) "99+" else unread.toString(); val badgeS = 18.dp; rw.addView(TextView(a).apply { text = cnt; textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = android.graphics.drawable.GradientDrawable().apply { setColor(Color.parseColor("#FF453A")); shape = android.graphics.drawable.GradientDrawable.OVAL }; val padH = if (cnt.length > 1) 4.dp else 0; setPadding(padH, 0, padH, 0) }, LinearLayout.LayoutParams(badgeS, badgeS).apply { marginStart = 8.dp }) } }; ls.addView(rw); ls.addView(View(a).apply { setBackgroundColor(Color.parseColor("#18FFFFFF")) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g)) }
+        for (itm in items) { val rw = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(ph, pv, ph, pv); minimumHeight = 48.dp; isClickable = true; isFocusable = true; foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#18FFFFFF")); setOnClickListener { go(a, itm); if (DrawerConfig.autoClose) closeDrawer() } }; val bm = FabConfig.iconBitmaps[resolveIconKey(itm.icon)]; if (bm != null) rw.addView(ImageView(a).apply { setImageBitmap(bm); scaleType = ImageView.ScaleType.FIT_CENTER; setColorFilter(Color.WHITE); layoutParams = LinearLayout.LayoutParams(isz, isz).apply { marginEnd = ph } }); rw.addView(TextView(a).apply { text = itm.text; textSize = fs; setTextColor(Color.WHITE) }); if (itm.type == "timeline") { val unread = ChatState.snsUnreadCount; if (unread > 0) { val cnt = if (unread > 99) "99+" else unread.toString(); val badgeS = 18.dp; rw.addView(TextView(a).apply { text = cnt; textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = android.graphics.drawable.GradientDrawable().apply { setColor(Color.parseColor("#FF453A")); shape = android.graphics.drawable.GradientDrawable.OVAL }; val padH = if (cnt.length > 1) 4.dp else 0; setPadding(padH, 0, padH, 0) }, LinearLayout.LayoutParams(badgeS, badgeS).apply { marginStart = 8.dp }) } }; if (itm.type == "tab_contacts") { val unread = ChatState.contactsUnreadCount; if (unread > 0) { val cnt = if (unread > 99) "99+" else unread.toString(); val badgeS = 18.dp; rw.addView(TextView(a).apply { text = cnt; textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; background = android.graphics.drawable.GradientDrawable().apply { setColor(Color.parseColor("#FF453A")); shape = android.graphics.drawable.GradientDrawable.OVAL }; val padH = if (cnt.length > 1) 4.dp else 0; setPadding(padH, 0, padH, 0) }, LinearLayout.LayoutParams(badgeS, badgeS).apply { marginStart = 8.dp }) } }; ls.addView(rw); ls.addView(View(a).apply { setBackgroundColor(Color.parseColor("#18FFFFFF")) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g)) }
         sc.addView(ls); pn.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         pn.addView(TextView(a).apply { text = "← 点击外部关闭"; textSize = 11f; setTextColor(Color.parseColor("#60FFFFFF")); gravity = Gravity.CENTER; setPadding(0, pv, 0, pv) })
         ov.addView(pn, FrameLayout.LayoutParams(pw, FrameLayout.LayoutParams.MATCH_PARENT).apply { gravity = Gravity.START })

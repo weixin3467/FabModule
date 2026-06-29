@@ -60,7 +60,13 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     // SnsTimeLineUI opened → badge cleared (user viewing Moments)
                     if (cls.contains("SnsTimeLineUI")) {
                         ChatState.snsUnreadCount = 0
+                        ChatState.updateHamburgerDot()
                         return@hookAllMethods
+                    }
+                    // Contacts UI opened → badge cleared (user viewing contacts)
+                    if (cls.contains("Contact") || cls.contains("contact")) {
+                        ChatState.contactsUnreadCount = 0
+                        ChatState.updateHamburgerDot()
                     }
                     if (!cls.contains("LauncherUI")) return@hookAllMethods
                     isInChat = false; ChatState.inChat = false; ChatState.launcherActivity = a
@@ -374,12 +380,12 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
             for ((_, cx, count) in found) {
                 val section = ((cx - left) * 4) / w
-                if (section == 2) { // 发现 tab
-                    ChatState.snsUnreadCount = count
-                    Log.i("Badge init: 发现 tab count=$count")
-                    return
+                when (section) {
+                    1 -> { ChatState.contactsUnreadCount = count; Log.i("Badge init: 通讯录 count=$count") }
+                    2 -> { ChatState.snsUnreadCount = count; Log.i("Badge init: 发现 count=$count") }
                 }
             }
+            ChatState.updateHamburgerDot()
         } catch (_: Throwable) {}
     }
 
@@ -439,14 +445,25 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 else -> return  // not a badge (e.g. tab label)
             }
 
-            // Guess tab section by X position (0..3)
+            // Guess tab section by X position (0=微信,1=通讯录,2=发现,3=我)
             val cx = loc[0] + v.width / 2
             val section = (cx * 4) / screenW
-            if (section != 2) return  // not 发现 tab
-
-            if (ChatState.snsUnreadCount != count) {
-                ChatState.snsUnreadCount = count
-                Log.i("Badge event: section=$section count=$count text='$text'")
+            when (section) {
+                1 -> {
+                    if (ChatState.contactsUnreadCount != count) {
+                        ChatState.contactsUnreadCount = count
+                        ChatState.updateHamburgerDot()
+                        Log.i("Badge event: 通讯录 count=$count text='$text'")
+                    }
+                }
+                2 -> {
+                    if (ChatState.snsUnreadCount != count) {
+                        ChatState.snsUnreadCount = count
+                        ChatState.updateHamburgerDot()
+                        Log.i("Badge event: 发现 count=$count text='$text'")
+                    }
+                }
+                else -> return
             }
         } catch (_: Throwable) {}
     }
@@ -563,26 +580,26 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             row.addView(TextView(a).apply {
                 text = item.text; textSize = fSize; setTextColor(Color.WHITE)
             })
-            // Badge for 朋友圈 unread (from bottom-tab scan)
-            if (item.type == "timeline") {
-                val unread = ChatState.snsUnreadCount
-                if (unread > 0) {
-                    val cnt = if (unread > 99) "99+" else unread.toString()
-                    val badgeS = 18.dp
-                    row.addView(TextView(a).apply {
-                        text = cnt; textSize = 11f
-                        setTextColor(Color.WHITE); gravity = Gravity.CENTER
-                        background = android.graphics.drawable.GradientDrawable().apply {
-                            setColor(Color.parseColor("#FF453A"))
-                            shape = android.graphics.drawable.GradientDrawable.OVAL
-                        }
-                        val padH = if (cnt.length > 1) 4.dp else 0
-                        setPadding(padH, 0, padH, 0)
-                    }, LinearLayout.LayoutParams(badgeS, badgeS).apply {
-                        marginStart = 8.dp
-                    })
-                }
+            // Badge helper — shared by timeline and contacts
+            fun addBadge(unreadCount: Int) {
+                if (unreadCount <= 0) return
+                val cnt = if (unreadCount > 99) "99+" else unreadCount.toString()
+                val badgeS = 18.dp
+                row.addView(TextView(a).apply {
+                    text = cnt; textSize = 11f
+                    setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(Color.parseColor("#FF453A"))
+                        shape = android.graphics.drawable.GradientDrawable.OVAL
+                    }
+                    val padH = if (cnt.length > 1) 4.dp else 0
+                    setPadding(padH, 0, padH, 0)
+                }, LinearLayout.LayoutParams(badgeS, badgeS).apply {
+                    marginStart = 8.dp
+                })
             }
+            if (item.type == "timeline") addBadge(ChatState.snsUnreadCount)
+            if (item.type == "tab_contacts") addBadge(ChatState.contactsUnreadCount)
             menu.addView(row)
             rows += row
             if (++idx < total) menu.addView(View(a).apply {
