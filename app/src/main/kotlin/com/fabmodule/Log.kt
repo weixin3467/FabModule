@@ -6,7 +6,12 @@ package com.fabmodule
  */
 object Log {
     private const val TAG = "FabModule"
-    fun i(msg: String) { log(msg) }
+
+    private val debug: Boolean by lazy {
+        try { BuildConfig.DEBUG } catch (_: Throwable) { true }
+    }
+
+    fun i(msg: String) { if (debug) log(msg) }
     fun w(msg: String) { log("WARN: $msg") }
     fun e(msg: String) { log("ERROR: $msg") }
     fun e(msg: String, t: Throwable) { log("ERROR: $msg — ${t.message}") }

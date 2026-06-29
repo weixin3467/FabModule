@@ -53,6 +53,7 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     // Chat indicator views — when these are added, we're entering chat.
     // When removed, we're leaving chat and should re-inject hamburger.
+
     private val chatViewPatterns = listOf(
         "com.tencent.mm.pluginsdk.ui.chat.ChattingUILayout",
         "com.tencent.mm.ui.chatting.view.MMChattingListView",
@@ -61,6 +62,31 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     override fun install() {
         if (!DrawerConfig.enable) return
+
+        // ═══════════════════════════════════════════════════════════
+        // Layer 0: Fragment lifecycle — primary detection for 8.0.65+
+        // ═══════════════════════════════════════════════════════════
+        // WeChat 8.0.65: ChattingUI changed from Activity to Fragment.
+        // BaseHook.installFragmentHooks() hooks all 3 Fragment base classes
+        // (androidx, support-v4, android.app) with both public onResume/onPause
+        // AND internal performResume/performPause.
+        // ═══════════════════════════════════════════════════════════
+        installFragmentHooks("Drawer",
+            onEnter = {
+                injectionGen++; removeHamburger()
+                if (drawerOpen) closeDrawer()
+            },
+            onLeave = {
+                if (hamburgerView != null) return@installFragmentHooks
+                handler.postDelayed({
+                    if (hamburgerView == null) {
+                        val a = ChatState.launcherActivity ?: return@postDelayed
+                        if (a.isFinishing || a.isDestroyed) return@postDelayed
+                        injectionGen++; val gen = injectionGen
+                        if (injectionGen == gen) injectHamburger(a)
+                    }
+                }, 500)
+            })
 
         // Layer 1: addView chat view → first entry per session
         try {
@@ -114,9 +140,16 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                         if (hamburgerView != null) return
                         Log.i("Drawer: IME hide → re-inject")
                         val a = ChatState.launcherActivity ?: return
+                        if (a.isFinishing || a.isDestroyed) return
                         injectionGen++; val gen = injectionGen
-                        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 300)
-                        handler.postDelayed({ if (injectionGen == gen) injectHamburger(a) }, 1200)
+                        handler.postDelayed({
+                            if (injectionGen == gen && !a.isFinishing && !a.isDestroyed)
+                                injectHamburger(a)
+                        }, 300)
+                        handler.postDelayed({
+                            if (injectionGen == gen && !a.isFinishing && !a.isDestroyed)
+                                injectHamburger(a)
+                        }, 1200)
                     }
                 })
             Log.i("Drawer: IME spy OK")
@@ -141,6 +174,53 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                 })
             Log.i("Drawer: Focus spy OK")
         } catch (_: Throwable) { Log.w("Drawer: Focus spy FAILED") }
+
+        // Layer 5: View.setVisibility — catches Fragment.show()/hide().
+        // When WeChat 8.0.65 shows/hides ChattingUIFragment via FragmentTransaction,
+        // the fragment's root View gets setVisibility(VISIBLE/GONE). Our Fragment
+        // base-class hooks never fire because WeChat overrides onResume without super.
+        // StackTrace check (like XModule RemoveSelectionLimit) catches the fragment
+        // manager dispatch from code paths containing "chatting".
+        try {
+            val viewClass = lpparam.classLoader.loadClass("android.view.View")
+            de.robv.android.xposed.XposedBridge.hookAllMethods(viewClass, "setVisibility",
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!hamburgerLaidOut) return
+                        val newVis = param.args[0] as? Int ?: return
+                        val v = param.thisObject as? View ?: return
+                        // Filter: only large views (fragment-roots, >half screen)
+                        if (v.width < 300 || v.height < 300) return
+                        val st = Thread.currentThread().stackTrace
+                        val inChatContext = st.any { f ->
+                            val cn = f.className
+                            cn.contains("chatting") || cn.contains("ChattingUI") ||
+                            cn.contains("Chatting") || cn.contains("chatroom")
+                        }
+                        if (!inChatContext) return
+                        when (newVis) {
+                            View.VISIBLE -> {
+                                Log.i("Drawer: L5 setVisibility(VISIBLE) chat → remove")
+                                injectionGen++; removeHamburger()
+                                if (drawerOpen) closeDrawer()
+                            }
+                            View.GONE, View.INVISIBLE -> {
+                                if (hamburgerView != null) return
+                                Log.i("Drawer: L5 setVisibility(GONE) chat → re-inject")
+                                handler.postDelayed({
+                                    if (hamburgerView == null) {
+                                        val a = ChatState.launcherActivity ?: return@postDelayed
+                                        if (a.isFinishing || a.isDestroyed) return@postDelayed
+                                        injectionGen++; val gen = injectionGen
+                                        if (injectionGen == gen) injectHamburger(a)
+                                    }
+                                }, 500)
+                            }
+                        }
+                    }
+                })
+            Log.i("Drawer: L5 View.setVisibility spy OK")
+        } catch (_: Throwable) { Log.w("Drawer: L5 setVisibility spy FAILED") }
 
         // === Activity lifecycle — initial LauncherUI injection ===
         hookAllMethods("android.app.Activity", "onResume",
@@ -185,6 +265,13 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     private fun injectHamburger(a: android.app.Activity) {
         try {
+            // Self-sufficient — compute density from current Activity if not yet set
+            if (density <= 0f) {
+                val dm = a.resources.displayMetrics; density = dm.density
+                val resId = a.resources.getIdentifier("status_bar_height", "dimen", "android")
+                statusBarH = if (resId > 0) a.resources.getDimensionPixelSize(resId)
+                             else (24 * dm.density).toInt()
+            }
             // decorView (window root) — floats above android.R.id.content
             // where WeChat ActionBar covers the top-left corner.
             val root = (a.window?.decorView as? ViewGroup) ?: return
@@ -200,6 +287,15 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             lineTop = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineTop!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; bottomMargin = lg })
             lineMid = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineMid!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER })
             lineBot = View(a).apply { setBackgroundColor(Color.WHITE) }; ctr.addView(lineBot!!, FrameLayout.LayoutParams(lw, lh).apply { gravity = Gravity.CENTER; topMargin = lg })
+            // Red dot indicator (top-right) — shown when Moments or Contacts has unread
+            val dotSz = 8.dp; val dot = View(a).apply {
+                setBackgroundColor(Color.parseColor("#FF453A"))
+                visibility = View.GONE
+            }
+            ctr.addView(dot, FrameLayout.LayoutParams(dotSz, dotSz).apply {
+                gravity = Gravity.END or Gravity.TOP; setMargins(0, 2.dp, 2.dp, 0)
+            })
+            ChatState.hamburgerDot = dot; ChatState.updateHamburgerDot()
             root.addView(ctr, FrameLayout.LayoutParams(sz, sz).apply { gravity = Gravity.START or Gravity.TOP; setMargins(ml, mt, 0, 0) })
             ctr.bringToFront(); hamburgerView = ctr
             hamburgerLaidOut = true
@@ -210,6 +306,7 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     /** Remove hamburger from decorView (needed because decorView children persist). */
     private fun removeHamburger() {
         hamburgerLaidOut = false
+        ChatState.hamburgerDot = null
         hamburgerView?.let {
             try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {}
         }
@@ -219,29 +316,149 @@ class DrawerHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     private fun toggleDrawer(a: android.app.Activity) { if (drawerOpen) closeDrawer() else openDrawer(a) }
 
+    // ═══════════════════════════════════════════════════════════
+    // Drawer open / close
+    // ═══════════════════════════════════════════════════════════
+
     private fun openDrawer(a: android.app.Activity) {
-        if (drawerOpen) return; removeOverlay(); drawerOpen = true; setArrowState(true)
+        if (drawerOpen) return
+        removeOverlay()
+        drawerOpen = true; setArrowState(true)
+
         val items = DrawerConfig.items.ifEmpty { DrawerConfig.defaultItems }.filter { it.enable }
-        // Drawer overlay on decorView topmost
         val root = (a.window?.decorView as? ViewGroup) ?: return
         val pw = (DrawerConfig.widthDp * density + 0.5f).toInt()
-        val isz = 24.dp; val fs = 15f; val ph = 16.dp; val pv = 12.dp; val g = 1.dp
-        val ov = FrameLayout(a).apply { tag = TAG_DRAWER; setBackgroundColor(Color.parseColor("#88000000")); elevation = 1000f; isClickable = true; isFocusable = true; setOnClickListener { closeDrawer() }; alpha = 0f; animate().alpha(1f).setDuration(200).start() }
-        val pn = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#EE1E1E1E")); setPadding(0, 40.dp, 0, 0); translationX = -pw.toFloat() }
-        pn.addView(TextView(a).apply { text = "FabModule"; textSize = 16f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(ph, pv, ph, pv + 8.dp); setTypeface(null, android.graphics.Typeface.BOLD) })
-        pn.addView(View(a).apply { setBackgroundColor(Color.parseColor("#30FFFFFF")) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g))
-        val sc = ScrollView(a).apply { isVerticalScrollBarEnabled = false }
-        val ls = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
-        for (itm in items) { val rw = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(ph, pv, ph, pv); minimumHeight = 48.dp; isClickable = true; isFocusable = true; foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#18FFFFFF")); setOnClickListener { go(a, itm); if (DrawerConfig.autoClose) closeDrawer() } }; val bm = FabConfig.iconBitmaps[resolveIconKey(itm.icon)]; if (bm != null) rw.addView(ImageView(a).apply { setImageBitmap(bm); scaleType = ImageView.ScaleType.FIT_CENTER; setColorFilter(Color.WHITE); layoutParams = LinearLayout.LayoutParams(isz, isz).apply { marginEnd = ph } }); rw.addView(TextView(a).apply { text = itm.text; textSize = fs; setTextColor(Color.WHITE) }); ls.addView(rw); ls.addView(View(a).apply { setBackgroundColor(Color.parseColor("#18FFFFFF")) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g)) }
-        sc.addView(ls); pn.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        pn.addView(TextView(a).apply { text = "← 点击外部关闭"; textSize = 11f; setTextColor(Color.parseColor("#60FFFFFF")); gravity = Gravity.CENTER; setPadding(0, pv, 0, pv) })
-        ov.addView(pn, FrameLayout.LayoutParams(pw, FrameLayout.LayoutParams.MATCH_PARENT).apply { gravity = Gravity.START })
-        root.addView(ov, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        drawerOverlay = ov; drawerPanel = pn; pn.post { pn.animate().translationX(0f).setDuration(250).setInterpolator(DecelerateInterpolator()).start() }
+        val ph = 16.dp; val pv = 12.dp; val g = 1.dp
+
+        // Dim overlay — click to close
+        val ov = FrameLayout(a).apply {
+            tag = TAG_DRAWER
+            setBackgroundColor(Color.parseColor("#88000000"))
+            elevation = 1000f; isClickable = true; isFocusable = true
+            setOnClickListener { closeDrawer() }
+            alpha = 0f; animate().alpha(1f).setDuration(200).start()
+        }
+
+        // Sliding panel
+        val pn = buildDrawerPanel(a, items, pw, ph, pv, g)
+
+        ov.addView(pn, FrameLayout.LayoutParams(pw, FrameLayout.LayoutParams.MATCH_PARENT).apply {
+            gravity = Gravity.START
+        })
+        root.addView(ov, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        drawerOverlay = ov; drawerPanel = pn
+        pn.post {
+            pn.animate().translationX(0f).setDuration(250)
+                .setInterpolator(DecelerateInterpolator()).start()
+        }
     }
 
-    private fun closeDrawer() { if (!drawerOpen) return; drawerOpen = false; setArrowState(false); drawerPanel?.animate()?.translationX(-drawerPanel!!.width.toFloat())?.setDuration(180)?.setInterpolator(DecelerateInterpolator())?.start(); drawerOverlay?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction { removeOverlay() }?.start() ?: removeOverlay() }
-    private fun removeOverlay() { drawerOverlay?.let { try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {} }; drawerOverlay = null; drawerPanel = null }
+    private fun closeDrawer() {
+        if (!drawerOpen) return
+        drawerOpen = false; setArrowState(false)
+        drawerPanel?.animate()
+            ?.translationX(-drawerPanel!!.width.toFloat())
+            ?.setDuration(180)?.setInterpolator(DecelerateInterpolator())?.start()
+        drawerOverlay?.animate()?.alpha(0f)?.setDuration(180)
+            ?.withEndAction { removeOverlay() }?.start()
+            ?: removeOverlay()
+    }
+
+    private fun removeOverlay() {
+        drawerOverlay?.let {
+            try { (it.parent as? ViewGroup)?.removeView(it) } catch (_: Throwable) {}
+        }
+        drawerOverlay = null; drawerPanel = null
+    }
+
+    /** Build the sliding panel with title, item list, and hint. */
+    private fun buildDrawerPanel(
+        a: android.app.Activity, items: List<DrawerConfig.DrawerItem>,
+        pw: Int, ph: Int, pv: Int, g: Int
+    ): LinearLayout {
+        val pn = LinearLayout(a).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#EE1E1E1E"))
+            setPadding(0, 40.dp, 0, 0)
+            translationX = -pw.toFloat()
+        }
+        // Title
+        pn.addView(TextView(a).apply {
+            text = "FabModule"; textSize = 16f; setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER; setPadding(ph, pv, ph, pv + 8.dp)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+        })
+        pn.addView(View(a).apply {
+            setBackgroundColor(Color.parseColor("#30FFFFFF"))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g))
+
+        // Scrollable item list
+        val sc = ScrollView(a).apply { isVerticalScrollBarEnabled = false }
+        val ls = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
+        for (itm in items) {
+            ls.addView(buildDrawerItem(a, itm, ph, pv))
+            ls.addView(View(a).apply {
+                setBackgroundColor(Color.parseColor("#18FFFFFF"))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, g))
+        }
+        sc.addView(ls)
+        pn.addView(sc, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // Hint
+        pn.addView(TextView(a).apply {
+            text = "← 点击外部关闭"; textSize = 11f
+            setTextColor(Color.parseColor("#60FFFFFF"))
+            gravity = Gravity.CENTER; setPadding(0, pv, 0, pv)
+        })
+        return pn
+    }
+
+    /** Build a single drawer menu item row (icon + label + optional badge). */
+    private fun buildDrawerItem(
+        a: android.app.Activity, item: DrawerConfig.DrawerItem, ph: Int, pv: Int
+    ): LinearLayout {
+        val isz = 24.dp; val fs = 15f
+        val row = LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(ph, pv, ph, pv); minimumHeight = 48.dp
+            isClickable = true; isFocusable = true
+            foreground = android.graphics.drawable.ColorDrawable(Color.parseColor("#18FFFFFF"))
+            setOnClickListener { go(a, item); if (DrawerConfig.autoClose) closeDrawer() }
+        }
+        FabConfig.iconBitmaps[resolveIconKey(item.icon)]?.let { bm ->
+            row.addView(ImageView(a).apply {
+                setImageBitmap(bm); scaleType = ImageView.ScaleType.FIT_CENTER
+                setColorFilter(Color.WHITE)
+            }, LinearLayout.LayoutParams(isz, isz).apply { marginEnd = ph })
+        }
+        row.addView(TextView(a).apply {
+            text = item.text; textSize = fs; setTextColor(Color.WHITE)
+        })
+        // Badge for Moments / Contacts
+        val unread = when (item.type) {
+            "timeline" -> ChatState.snsUnreadCount
+            "tab_contacts" -> ChatState.contactsUnreadCount
+            else -> 0
+        }
+        if (unread > 0) addBadgeToRow(a, row, unread)
+        return row
+    }
+
+    /** Attach red unread-count badge to a [row]. */
+    private fun addBadgeToRow(a: android.app.Activity, row: LinearLayout, count: Int) {
+        val badgeS = 18.dp
+        val cnt = if (count > 99) "99+" else count.toString()
+        row.addView(TextView(a).apply {
+            text = cnt; textSize = 11f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#FF453A"))
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+            }
+            val padH = if (cnt.length > 1) 4.dp else 0
+            setPadding(padH, 0, padH, 0)
+        }, LinearLayout.LayoutParams(badgeS, badgeS).apply { marginStart = 8.dp })
+    }
 
     private fun setArrowState(toArrow: Boolean) {
         val tp = lineTop ?: return; val md = lineMid ?: return; val bt = lineBot ?: return
