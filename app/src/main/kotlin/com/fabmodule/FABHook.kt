@@ -530,12 +530,14 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
         val rad   = 16.dp.toFloat()
 
         val overlay = FrameLayout(a).apply {
-            setBackgroundColor(Color.parseColor("#40000000"))  // visual dim ONLY
-            isClickable = false; isFocusable = false           // pass through ALL touches
+            setBackgroundColor(Color.parseColor("#40000000"))
+            isClickable = true; isFocusable = true
+            setOnClickListener { dismissMenu() }   // tap outside menu → dismiss
             alpha = 0f; animate().alpha(1f).setDuration(200).start()
         }
         val menu = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
+            isClickable = true; isFocusable = true  // consume events → don't bubble to overlay
             background = android.graphics.drawable.GradientDrawable().apply {
                 setColor(Color.parseColor("#DD1E1E1E"))
                 cornerRadius = rad
@@ -610,6 +612,7 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             gravity = Gravity.END or Gravity.BOTTOM; setMargins(0, 0, rM, botM) })
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        fabView?.bringToFront()  // keep FAB above the dim overlay
         menuOverlay = overlay
 
         // Staggered item entrance — cascading reveal
