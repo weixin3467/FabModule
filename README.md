@@ -112,7 +112,8 @@ app/src/main/kotlin/com/fabmodule/
 
 ```bash
 cd FabModule
-JAVA_HOME=E:\apps\java\jdk17 ./gradlew clean assembleDebug
+# 确保 JAVA_HOME 指向 JDK 17
+./gradlew clean assembleDebug
 # 输出: app/build/outputs/apk/debug/app-debug.apk (~890KB)
 ```
 
@@ -132,20 +133,20 @@ JAVA_HOME=E:\apps\java\jdk17 ./gradlew clean assembleDebug
 
 ```bash
 # 1. 构建 + 安装
-cd E:\claude-data\FabModule
-JAVA_HOME=E:\apps\java\jdk17 ./gradlew assembleDebug
-adb -s emulator-5556 install -r app/build/outputs/apk/debug/app-debug.apk
+cd FabModule
+./gradlew assembleDebug
+adb -s <emulator> install -r app/build/outputs/apk/debug/app-debug.apk
 
 # 2. 冷启动微信
-adb -s emulator-5556 shell am force-stop com.tencent.mm
-adb -s emulator-5556 shell monkey -p com.tencent.mm -c android.intent.category.LAUNCHER 1
+adb -s <emulator> shell am force-stop com.tencent.mm
+adb -s <emulator> shell monkey -p com.tencent.mm -c android.intent.category.LAUNCHER 1
 
 # 3. ⚠️ 等待 2 分钟（微信冷启动慢）
 sleep 120
 
 # 4. 确认无误后检查日志
-adb -s emulator-5556 shell "su -c 'ls -lt /data/adb/lspd/log/ | head -3'"
-adb -s emulator-5556 shell "su -c 'grep -i fabmodule /data/adb/lspd/log/verbose_<最新文件>.log | head -40'"
+adb -s <emulator> shell "su -c 'ls -lt /data/adb/lspd/log/ | head -3'"
+adb -s <emulator> shell "su -c 'grep -i fabmodule /data/adb/lspd/log/verbose_<最新文件>.log | head -40'"
 ```
 
 ### 验证日志
