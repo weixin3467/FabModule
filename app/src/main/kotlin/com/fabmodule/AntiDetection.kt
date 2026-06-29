@@ -164,31 +164,29 @@ object AntiDetection {
 
         // 7. Block system property leaks (Xposed-related props)
         try {
-            System::class.java.getDeclaredMethod("getProperty", String::class.java).let { m ->
-                XposedHelpers.findAndHookMethod(
-                    System::class.java, "getProperty", String::class.java,
-                    object : de.robv.android.xposed.XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            val key = param.args[0] as? String ?: return
-                            if (key.lowercase().contains("xposed") ||
-                                key.lowercase().contains("edxposed") ||
-                                key.lowercase().contains("lsposed")) {
-                                param.result = null
-                            }
+            XposedHelpers.findAndHookMethod(
+                System::class.java, "getProperty", String::class.java,
+                object : de.robv.android.xposed.XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val key = param.args[0] as? String ?: return
+                        if (key.lowercase().contains("xposed") ||
+                            key.lowercase().contains("edxposed") ||
+                            key.lowercase().contains("lsposed")) {
+                            param.result = null
                         }
-                    })
-            }
+                    }
+                })
             installed++; Log.i("AntiDetect: 7.props OK")
+        } catch (e: Exception) { Log.w("AntiDetect: props ${e.message}") }
 
         // 8. Block /proc/self/maps read — filter xposed/lsposed so entries
         try {
-            val fisClass = java.io.FileInputStream::class.java
-            XposedHelpers.findAndHookConstructor(fisClass, String::class.java,
+            XposedHelpers.findAndHookConstructor(
+                java.io.FileInputStream::class.java, String::class.java,
                 object : de.robv.android.xposed.XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val path = param.args[0] as? String ?: return
                         if (path == "/proc/self/maps" || path.endsWith("/maps")) {
-                            // Create a clean copy of maps without xposed entries
                             runCatching {
                                 val original = java.io.File(path).readLines()
                                 val filtered = original.filter { line ->
@@ -204,7 +202,6 @@ object AntiDetection {
                 })
             installed++; Log.i("AntiDetect: 8.maps OK")
         } catch (e: Exception) { Log.w("AntiDetect: maps ${e.message}") }
-        } catch (e: Exception) { Log.w("AntiDetect: props ${e.message}") }
 
         Log.i("AntiDetect: $installed/8 layers active")
     }

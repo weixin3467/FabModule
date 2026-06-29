@@ -39,7 +39,19 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
             // Fragment lifecycle hooks for 8.0.65+ (ChattingUI is Fragment, not Activity)
             // Try all three Fragment base classes — support-v4 on older Android,
             // AndroidX on newer, android.app.Fragment as last resort.
-            installFragmentHooks()
+            installFragmentHooks("FAB",
+                onEnter = {
+                    isInChat = true; ChatState.inChat = true
+                    stopKeepAlive(); removeOverlay(); removeFab()
+                },
+                onLeave = {
+                    isInChat = false; ChatState.inChat = false
+                    val a = ChatState.launcherActivity ?: return@installFragmentHooks
+                    if (a.isFinishing || a.isDestroyed) return@installFragmentHooks
+                    handler.postDelayed({ injectFab(a) }, 300)
+                    handler.postDelayed({ injectFab(a) }, 800)
+                    handler.postDelayed({ startKeepAlive(a) }, 1200)
+                })
 
             hookAllMethods("android.app.Activity", "onResume",
                 onAfter = { p ->
@@ -180,90 +192,6 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
     }
 
     // == Startup validation ==
-
-    /** Check if a Fragment is WeChat's chat UI (ChattingUIFragment / BaseChattingUIFragment). */
-    private fun isChatFragment(fragment: Any): Boolean {
-        var cls: Class<*>? = fragment.javaClass
-        while (cls != null && cls.name.startsWith("com.tencent.mm.")) {
-            val name = cls.name
-            if (name.contains("ChattingUI") || name.contains("chatting") ||
-                name.contains("ChatRoomUI") || name.contains("chatroom"))
-                return true
-            cls = cls.superclass
-        }
-        return false
-    }
-
-    /**
-     * Install Fragment lifecycle hooks on ALL Fragment base classes.
-     * Hooks both public onResume/onPause AND internal performResume/performPause
-     * to catch WeChat fragments that override lifecycle methods without super.
-     */
-    private fun installFragmentHooks() {
-        val candidates = listOf(
-            "androidx.fragment.app.Fragment" to "androidx",
-            "android.support.v4.app.Fragment" to "support-v4",
-            "android.app.Fragment" to "android.app"
-        )
-        var hooked = 0
-        for ((className, label) in candidates) {
-            try {
-                val fragClass = lpparam.classLoader.loadClass(className)
-
-                // Public hooks (may be overridden without super)
-                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onResume",
-                    object : de.robv.android.xposed.XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (!isChatFragment(param.thisObject)) return
-                            Log.i("FAB: L0($label) onResume → hide")
-                            isInChat = true; ChatState.inChat = true
-                            stopKeepAlive(); removeOverlay(); removeFab()
-                        }
-                    })
-                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "onPause",
-                    object : de.robv.android.xposed.XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (!isChatFragment(param.thisObject)) return
-                            Log.i("FAB: L0($label) onPause → re-inject")
-                            isInChat = false; ChatState.inChat = false
-                            val a = ChatState.launcherActivity ?: return
-                            if (a.isFinishing || a.isDestroyed) return
-                            handler.postDelayed({ injectFab(a) }, 300)
-                            handler.postDelayed({ injectFab(a) }, 800)
-                            handler.postDelayed({ startKeepAlive(a) }, 1200)
-                        }
-                    })
-
-                // Internal dispatch hooks — called by FragmentManager,
-                // never overridden by subclasses (package-private/final).
-                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performResume",
-                    object : de.robv.android.xposed.XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (!isChatFragment(param.thisObject)) return
-                            Log.i("FAB: L0($label) performResume → hide")
-                            isInChat = true; ChatState.inChat = true
-                            stopKeepAlive(); removeOverlay(); removeFab()
-                        }
-                    })
-                de.robv.android.xposed.XposedBridge.hookAllMethods(fragClass, "performPause",
-                    object : de.robv.android.xposed.XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
-                            if (!isChatFragment(param.thisObject)) return
-                            Log.i("FAB: L0($label) performPause → re-inject")
-                            isInChat = false; ChatState.inChat = false
-                            val a = ChatState.launcherActivity ?: return
-                            if (a.isFinishing || a.isDestroyed) return
-                            handler.postDelayed({ injectFab(a) }, 300)
-                            handler.postDelayed({ injectFab(a) }, 800)
-                            handler.postDelayed({ startKeepAlive(a) }, 1200)
-                        }
-                    })
-                hooked++
-            } catch (_: Throwable) {}
-        }
-        if (hooked > 0) Log.i("FAB: L0 Fragment spy OK ($hooked bases × 4 hooks each)")
-        else Log.w("FAB: L0 Fragment spy FAILED")
-    }
 
     private fun validateClasses(cl: ClassLoader) {
         val critical = listOf(
@@ -470,8 +398,11 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
 
     // == KeepAlive — self-limiting: stops when FAB is present ==
 
+    companion object { private const val MAX_KEEPALIVE_RETRIES = 30 }  // 30 × 2s = 60s max
+
     private fun startKeepAlive(a: android.app.Activity) {
         stopKeepAlive()
+        var retries = 0
         val r = object : Runnable {
             override fun run() {
                 try {
@@ -479,6 +410,10 @@ class FABHook(lpparam: XC_LoadPackage.LoadPackageParam) : BaseHook(lpparam) {
                     val fab = (a.findViewById<ViewGroup>(android.R.id.content)
                         ?: return).findViewWithTag<View>(TAG_FAB)
                     if (fab != null) return  // FAB present, stop polling — save battery
+                    if (++retries > MAX_KEEPALIVE_RETRIES) {
+                        Log.w("FAB: KeepAlive exhausted ($MAX_KEEPALIVE_RETRIES retries), giving up")
+                        return
+                    }
                     injectFab(a)
                     handler.postDelayed(this, 2000)
                 } catch (_: Throwable) { handler.postDelayed(this, 2000) }
